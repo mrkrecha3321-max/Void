@@ -197,6 +197,7 @@ const MenuScreen: React.FC<Props> = ({
           <div className="flex-1 ml-4 flex flex-col">
             <span className="text-base font-semibold text-foreground">O Void</span>
             <span className="text-sm text-muted-foreground">System łączności rozproszonej</span>
+            <span className="text-xs text-emerald-500 font-medium mt-1">Auto-updater aktywny ✅</span>
           </div>
           <span className="text-sm font-medium text-muted-foreground bg-secondary px-2.5 py-1 rounded-md">v{appVersion || '...'}</span>
         </div>
