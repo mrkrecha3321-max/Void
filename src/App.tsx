@@ -48,8 +48,9 @@ function App() {
         
         const currentVer = await getVersion();
         
-        const cleanServerVer = ver.replace(/^v/, '');
-        const cleanCurrentVer = currentVer.replace(/^v/, '');
+        // Usuwamy -beta, -alpha itp żeby został sam czysty numer
+        const cleanServerVer = ver.replace(/^v/, '').split('-')[0];
+        const cleanCurrentVer = currentVer.replace(/^v/, '').split('-')[0];
         
         const serverParts = cleanServerVer.split('.').map(Number);
         const currentParts = cleanCurrentVer.split('.').map(Number);
