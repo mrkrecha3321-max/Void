@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
@@ -21,7 +24,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android, armv7-linux-androideabi, i686-linux-android, x86_64-linux-android
+          targets: aarch64-linux-android
           
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -41,8 +44,8 @@ jobs:
       - name: Build Frontend
         run: npm run build
         
-      - name: Build Tauri Android
-        run: npm run tauri android build
+      - name: Build Tauri Android (AArch64 Fast Build)
+        run: npm run tauri android build -- --target aarch64
         
       - name: Prepare APK for Release
         run: |
