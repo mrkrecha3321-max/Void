@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme — używane przy light mode i jako fallback -->
+    <style name="Theme.vortex_app" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <!-- Tło na czarno — aplikacja i tak renderuje WebView na całym ekranie -->
+        <item name="android:windowBackground">@color/black</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- Edge-to-edge support -->
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="o_mr1">shortEdges</item>
+    </style>
+</resources>
