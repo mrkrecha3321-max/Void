@@ -234,6 +234,7 @@ fn ble_connect_to_peer(address: String) -> Result<bool, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
             native_bridge::set_app_handle(app.handle().clone());

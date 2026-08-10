@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { checkForUpdates, installUpdate } from "./api";
 import { getVersion } from "@tauri-apps/api/app";
+import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { motion, AnimatePresence } from "motion/react";
 import { AlertTriangle, MapPin, X, MoreVertical } from "lucide-react";
 import BottomNav from "./components/BottomNav";
@@ -67,6 +68,18 @@ function App() {
         
         if (isNewer) {
           setUpdateVersion(ver);
+          
+          let permissionGranted = await isPermissionGranted();
+          if (!permissionGranted) {
+            const permission = await requestPermission();
+            permissionGranted = permission === 'granted';
+          }
+          if (permissionGranted) {
+            sendNotification({ 
+              title: 'Void - Nowa Wersja', 
+              body: `Wersja ${ver} jest gotowa do pobrania! Otwórz aplikację by zainstalować.` 
+            });
+          }
         }
       } catch (err) {
         console.error(err);

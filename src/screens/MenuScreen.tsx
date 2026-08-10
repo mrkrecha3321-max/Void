@@ -11,6 +11,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useProfile } from '../hooks/useProfile';
+import { getVersion } from '@tauri-apps/api/app';
 
 interface Props {
   theme: Theme;
@@ -44,6 +45,11 @@ const MenuScreen: React.FC<Props> = ({
   const [sosName, setSosName] = useState('');
   const [sosDesc, setSosDesc] = useState('');
   const [sendingSos, setSendingSos] = useState(false);
+  const [appVersion, setAppVersion] = useState('');
+
+  React.useEffect(() => {
+    getVersion().then(v => setAppVersion(v)).catch(console.error);
+  }, []);
 
   const handleExportKeys = () => {
     const mockKeys = {
@@ -192,7 +198,7 @@ const MenuScreen: React.FC<Props> = ({
             <span className="text-base font-semibold text-foreground">O Void</span>
             <span className="text-sm text-muted-foreground">System łączności rozproszonej</span>
           </div>
-          <span className="text-sm font-medium text-muted-foreground bg-secondary px-2.5 py-1 rounded-md">v0.1.1 Beta</span>
+          <span className="text-sm font-medium text-muted-foreground bg-secondary px-2.5 py-1 rounded-md">v{appVersion || '...'}</span>
         </div>
 
         <div className="h-px bg-border/50 mx-6 my-4" />
