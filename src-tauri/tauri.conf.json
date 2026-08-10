@@ -37,7 +37,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/mrkrecha3321-max/Vortex/releases/latest/download/latest.json"
+        "https://github.com/mrkrecha3321-max/Void/releases/latest/download/latest.json"
       ]
     }
   }
