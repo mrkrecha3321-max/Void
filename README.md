@@ -108,4 +108,6 @@ npm run tauri android build -- --target aarch64
 
 ## 📄 Licencja
 
-Projekt objęty licencją **MIT**.
+Projekt objęty licencją **Open Source (Non-Commercial)**.
+
+Każdy użytkownik ma prawo do swobodnego pobierania, kopiowania, modyfikowania, rozwijania i tworzenia własnych wersji tego oprogramowania, **pod warunkiem, że aplikacja oraz jej modyfikacje NIGDY nie będą wykorzystywane w celach komercyjnych, płatnych lub odpłatnie dystrybuowane**.
