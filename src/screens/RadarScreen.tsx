@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Radio, MapPin, Zap } from 'lucide-react';
 import type { Peer } from '../types';
 import Avatar from '../components/Avatar';
+import { getCurrentPosition, checkPermissions, requestPermissions } from '@tauri-apps/plugin-geolocation';
+import { meshSendLocation } from '../api';
 
 interface Props {
   peers: Peer[];
@@ -16,6 +18,27 @@ interface Props {
  * n = 2.0 (Path Loss exponent)
  */
 export const calculateDistance = (
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number => {
+  const R = 6371e3; // Earth radius in metres
+  const p1 = (lat1 * Math.PI) / 180;
+  const p2 = (lat2 * Math.PI) / 180;
+  const dp = ((lat2 - lat1) * Math.PI) / 180;
+  const dl = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dp / 2) * Math.sin(dp / 2) +
+    Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  const distance = R * c;
+  return Math.max(0.1, Math.round(distance * 10) / 10);
+};
+
+export const calculateDistanceRssi = (
   rssi?: number,
   measuredPower: number = -59,
   n: number = 2.0
@@ -30,11 +53,65 @@ export const calculateDistance = (
 
 const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
   const [scanning, setScanning] = useState(true);
+  const [myLat, setMyLat] = useState<number | null>(null);
+  const [myLon, setMyLon] = useState<number | null>(null);
+
+  React.useEffect(() => {
+    let interval: ReturnType<typeof setInterval>;
+    let active = true;
+
+    const setupLocation = async () => {
+      try {
+        let perms = await checkPermissions();
+        if (perms.location !== 'granted') {
+          perms = await requestPermissions(['location', 'coarseLocation']);
+          if (perms.location !== 'granted') return;
+        }
+
+        const fetchLoc = async () => {
+          if (!active) return;
+          try {
+            const pos = await getCurrentPosition({ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+            if (pos && pos.coords) {
+              setMyLat(pos.coords.latitude);
+              setMyLon(pos.coords.longitude);
+
+              // Ping to all known peers
+              peers.filter(p => p.online).forEach(p => {
+                meshSendLocation(p.id, pos.coords.latitude, pos.coords.longitude).catch(() => {});
+              });
+            }
+          } catch (e) {
+            console.warn("Could not fetch location", e);
+          }
+        };
+
+        fetchLoc();
+        interval = setInterval(fetchLoc, 10000);
+      } catch (err) {
+        console.error('Geo error:', err);
+      }
+    };
+
+    if (scanning) {
+      setupLocation();
+    }
+
+    return () => {
+      active = false;
+      if (interval) clearInterval(interval);
+    };
+  }, [scanning, peers]);
   
   // Widoczni ludzie posortowani po odległości
   const visiblePeers = peers
     .filter(p => p.online)
-    .map(p => ({ ...p, distance: calculateDistance(p.rssi) }))
+    .map(p => {
+      if (myLat !== null && myLon !== null && p.lat !== undefined && p.lon !== undefined) {
+        return { ...p, distance: calculateDistance(myLat, myLon, p.lat, p.lon), method: 'gps' };
+      }
+      return { ...p, distance: calculateDistanceRssi(p.rssi), method: 'rssi' };
+    })
     .sort((a, b) => a.distance - b.distance);
 
   return (
@@ -107,8 +184,8 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
                   <div className="flex-1 min-w-0">
                     <div className="flex justify-between items-center mb-1">
                       <h3 className="font-semibold text-base truncate pr-2">{peer.name}</h3>
-                      <span className="text-xs font-bold text-accent px-2 py-1 bg-accent/10 rounded-full shrink-0">
-                        ~{peer.distance}m
+                      <span className={`text-[10px] font-bold px-2 py-1 rounded-full shrink-0 ${peer.method === 'gps' ? 'bg-blue-500/10 text-blue-500' : 'bg-accent/10 text-accent'}`}>
+                        {peer.method === 'gps' ? 'GPS' : 'BLE'} ~{peer.distance > 1000 ? (peer.distance / 1000).toFixed(1) + 'km' : peer.distance + 'm'}
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground truncate opacity-70">

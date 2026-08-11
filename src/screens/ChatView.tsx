@@ -115,6 +115,7 @@ const ChatView: React.FC<Props> = ({
                   text={msg.text}
                   sent={isSent}
                   timestamp={formatTimestamp(msg.timestamp)}
+                  delivered={msg.delivered}
                 />
               </motion.div>
             );

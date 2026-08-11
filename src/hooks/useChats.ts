@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { meshSendText, onMessageReceived, onPeerDiscovered } from '../api';
-import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload } from '../types';
+import { meshSendText, onMessageReceived, onPeerDiscovered, onMessageAckReceived } from '../api';
+import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload } from '../types';
 
 export function useChats() {
   const [chats, setChats] = useState<Chat[]>([]);
@@ -94,16 +94,20 @@ export function useChats() {
     return chatId;
   }, []);
 
-  const sendMessage = useCallback((chatId: string, text: string) => {
+  const sendMessage = useCallback(async (chatId: string, text: string) => {
     const chat = chatsRef.current.find(c => c.id === chatId);
     const recipientId = chat?.peerId || chatId;
+    
+    // We create a temporary message with a local ID
+    const tempId = Date.now().toString();
     const msg: Message = {
-      id: Date.now().toString(),
+      id: tempId,
       chatId,
       text,
       sent: true,
       timestamp: new Date(),
     };
+    
     setMessages(prev => ({
       ...prev,
       [chatId]: [...(prev[chatId] || []), msg],
@@ -115,7 +119,17 @@ export function useChats() {
           : c
       )
     );
-    meshSendText(recipientId, text);
+    
+    try {
+      const msgId = await meshSendText(recipientId, text);
+      // Replace the local ID with the real mesh ID so ACKs can match it
+      setMessages(prev => ({
+        ...prev,
+        [chatId]: (prev[chatId] || []).map(m => m.id === tempId ? { ...m, id: msgId } : m),
+      }));
+    } catch (err) {
+      console.error(err);
+    }
   }, []);
 
   const receiveMessage = useCallback((chatId: string, text: string, _peerName: string) => {
@@ -201,8 +215,31 @@ export function useChats() {
       });
     });
 
+    const unlistenAckPromise = onMessageAckReceived((payload: MessageAckPayload) => {
+      setMessages(prev => {
+        const next = { ...prev };
+        let modified = false;
+        
+        for (const [cId, msgs] of Object.entries(next)) {
+          const updatedMsgs = msgs.map(m => {
+            if (m.id === payload.msgId) {
+              modified = true;
+              return { ...m, delivered: true };
+            }
+            return m;
+          });
+          if (updatedMsgs !== msgs) {
+            next[cId] = updatedMsgs;
+          }
+        }
+        
+        return modified ? next : prev;
+      });
+    });
+
     return () => {
       unlistenPromise.then(unlisten => unlisten && unlisten());
+      unlistenAckPromise.then(unlisten => unlisten && unlisten());
     };
   }, []);
 

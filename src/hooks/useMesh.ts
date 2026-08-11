@@ -11,9 +11,10 @@ import {
   getConnectedAddresses,
   onBlePeerConnected,
   onBlePeerDisconnected,
+  onPeerLocationReceived,
   type BlePeerDiscovered,
 } from '../api';
-import type { Peer, PeerDiscoveredPayload, PeerStatusPayload } from '../types';
+import type { Peer, PeerDiscoveredPayload, PeerStatusPayload, PeerLocationPayload } from '../types';
 
 export function useMesh() {
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -115,6 +116,23 @@ export function useMesh() {
       }
     }).catch(() => undefined);
 
+    const locationPromise = onPeerLocationReceived((payload: PeerLocationPayload) => {
+      if (!isMounted) return;
+      setPeers(prev => {
+        const existingIndex = prev.findIndex(p => p.id === payload.peerId || p.id.endsWith(payload.peerId));
+        if (existingIndex >= 0) {
+          const updated = [...prev];
+          updated[existingIndex] = {
+            ...updated[existingIndex],
+            lat: payload.lat,
+            lon: payload.lon,
+          };
+          return updated;
+        }
+        return prev;
+      });
+    });
+
     const initNodeId = async () => {
       try {
         const id = await getNodeId();
@@ -192,6 +210,7 @@ export function useMesh() {
       connectedAddressPromise.then(unlisten => unlisten && unlisten());
       disconnectedAddressPromise.then(unlisten => unlisten && unlisten());
       permPromise.then(unlisten => unlisten && unlisten());
+      locationPromise.then(unlisten => unlisten && unlisten());
     };
   }, []);
 

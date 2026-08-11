@@ -6,6 +6,8 @@ export interface Peer {
   lastSeen?: Date | string;
   rssi?: number;
   address?: string;
+  lat?: number;
+  lon?: number;
 }
 
 export interface Chat {
@@ -45,6 +47,18 @@ export interface PeerDiscoveredPayload {
 export interface PeerStatusPayload {
   id: string;
   online: boolean;
+}
+
+export interface MessageAckPayload {
+  msgId: string;
+  peerId: string;
+}
+
+export interface PeerLocationPayload {
+  peerId: string;
+  lat: number;
+  lon: number;
+  timestamp: string;
 }
 
 // Legacy & UI Component Types & Aliases

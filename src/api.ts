@@ -5,6 +5,8 @@ import type {
   MessageReceivedPayload,
   PeerDiscoveredPayload,
   PeerStatusPayload,
+  MessageAckPayload,
+  PeerLocationPayload,
 } from './types';
 
 export type { UnlistenFn };
@@ -115,6 +117,32 @@ export const onPeerStatus = async (
   }
 };
 
+export const onMessageAckReceived = async (
+  callback: (payload: MessageAckPayload) => void
+): Promise<UnlistenFn | undefined> => {
+  try {
+    return await listen<MessageAckPayload>('message_ack_received', (event) => {
+      callback(event.payload);
+    });
+  } catch (error) {
+    console.warn('Tauri IPC not available in dev mode:', error);
+    return undefined;
+  }
+};
+
+export const onPeerLocationReceived = async (
+  callback: (payload: PeerLocationPayload) => void
+): Promise<UnlistenFn | undefined> => {
+  try {
+    return await listen<PeerLocationPayload>('peer_location_received', (event) => {
+      callback(event.payload);
+    });
+  } catch (error) {
+    console.warn('Tauri IPC not available in dev mode:', error);
+    return undefined;
+  }
+};
+
 // ---- Prawdziwe BLE (natywny most JNI, tylko Android) ----
 
 export const bleInit = async (name: string): Promise<void> => {
@@ -171,11 +199,21 @@ export const meshGetPublicKey = async (): Promise<string | undefined> => {
   }
 };
 
-export const meshSendText = async (recipientId: string, text: string): Promise<void> => {
+export const meshSendText = async (recipientId: string, text: string): Promise<string> => {
   try {
-    await invoke('mesh_send_text', { recipientId, text });
+    return await invoke<string>('mesh_send_text', { recipientId, text });
   } catch (error) {
     console.warn('mesh_send_text failed (peer moze byc nieznany/poza zasiegiem):', error);
+    throw error;
+  }
+};
+
+export const meshSendLocation = async (recipientId: string, lat: number, lon: number): Promise<string> => {
+  try {
+    return await invoke<string>('mesh_send_location', { recipientId, lat, lon });
+  } catch (error) {
+    console.warn('mesh_send_location failed:', error);
+    throw error;
   }
 };
 

@@ -1,13 +1,15 @@
 import React from 'react';
 import { motion } from 'motion/react';
+import { Check, CheckCheck } from 'lucide-react';
 
 interface Props {
   text: string;
   sent: boolean;
   timestamp: string;
+  delivered?: boolean;
 }
 
-const ChatBubble: React.FC<Props> = ({ text, sent, timestamp }) => {
+const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered }) => {
   return (
     <motion.div 
       initial={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -23,9 +25,20 @@ const ChatBubble: React.FC<Props> = ({ text, sent, timestamp }) => {
       >
         {text}
       </div>
-      <span className="text-[11px] text-muted-foreground mt-1 px-1">
-        {timestamp}
-      </span>
+      <div className="flex items-center gap-1 mt-1 px-1 justify-end">
+        <span className="text-[11px] text-muted-foreground">
+          {timestamp}
+        </span>
+        {sent && (
+          <span className="text-muted-foreground">
+            {delivered ? (
+              <CheckCheck size={14} className="text-blue-500" />
+            ) : (
+              <Check size={14} />
+            )}
+          </span>
+        )}
+      </div>
     </motion.div>
   );
 };

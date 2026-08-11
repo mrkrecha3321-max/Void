@@ -202,8 +202,13 @@ fn mesh_get_public_key(mesh: State<'_, mesh::MeshState>) -> String {
 }
 
 #[tauri::command]
-fn mesh_send_text(mesh: State<'_, mesh::MeshState>, recipient_id: String, text: String) -> Result<(), String> {
+fn mesh_send_text(mesh: State<'_, mesh::MeshState>, recipient_id: String, text: String) -> Result<String, String> {
     mesh::send_text(&mesh, &recipient_id, &text)
+}
+
+#[tauri::command]
+fn mesh_send_location(mesh: State<'_, mesh::MeshState>, recipient_id: String, lat: f64, lon: f64) -> Result<String, String> {
+    mesh::send_location(&mesh, &recipient_id, lat, lon)
 }
 
 #[tauri::command]
@@ -234,6 +239,7 @@ fn ble_connect_to_peer(address: String) -> Result<bool, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_geolocation::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(move |app| {
@@ -278,6 +284,7 @@ pub fn run() {
             ble_connect_to_peer,
             mesh_get_public_key,
             mesh_send_text,
+            mesh_send_location,
             get_connected_addresses
         ])
         .run(tauri::generate_context!())

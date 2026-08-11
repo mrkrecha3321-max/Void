@@ -25,7 +25,7 @@ pub struct DiscoveredPeer {
 #[serde(rename_all = "camelCase")]
 struct MeshEnvelope {
     msg_id: String,
-    msg_type: String, // "text" | "presence"
+    msg_type: String, // "text" | "presence" | "ack" | "location"
     sender_id: String,
     sender_pubkey: String,
     recipient_id: String, // "*" dla presence
@@ -33,6 +33,10 @@ struct MeshEnvelope {
     ciphertext: Option<String>,
     nonce: Option<String>,
     plain_presence_name: Option<String>,
+    // For location messages, payload will be encrypted in ciphertext,
+    // but for simple ack, we can just put original msg_id in a new field or use ciphertext.
+    // Let's use an explicit field for ACK to avoid encryption overhead for simple delivery receipts.
+    ack_msg_id: Option<String>,
 }
 
 pub struct MeshState {
@@ -170,12 +174,13 @@ pub fn send_presence(state: &MeshState, to_address: &str) {
                 .unwrap_or_else(|e| e.into_inner())
                 .clone(),
         ),
+        ack_msg_id: None,
     };
     let json = serde_json::to_string(&envelope).unwrap_or_default();
     let _ = native_bridge::calls::send_message(to_address, &json);
 }
 
-pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<(), String> {
+pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<String, String> {
     let pubkey = {
         let map = state.known_pubkeys.lock().map_err(|e| e.to_string())?;
         map.get(recipient_id).cloned()
@@ -194,10 +199,55 @@ pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<()
         ciphertext: Some(ciphertext),
         nonce: Some(nonce),
         plain_presence_name: None,
+        ack_msg_id: None,
     };
     state.mark_seen(&envelope.msg_id);
     relay(state, &envelope, None);
-    Ok(())
+    Ok(envelope.msg_id.clone())
+}
+
+pub fn send_location(state: &MeshState, recipient_id: &str, lat: f64, lon: f64) -> Result<String, String> {
+    let pubkey = {
+        let map = state.known_pubkeys.lock().map_err(|e| e.to_string())?;
+        map.get(recipient_id).cloned()
+    };
+    let pubkey = pubkey.ok_or_else(|| {
+        "Nieznany klucz publiczny odbiorcy".to_string()
+    })?;
+    let payload = format!("{},{}", lat, lon);
+    let (ciphertext, nonce) = crypto::encrypt(&state.identity, &pubkey, &payload);
+    let envelope = MeshEnvelope {
+        msg_id: uuid::Uuid::new_v4().to_string(),
+        msg_type: "location".into(),
+        sender_id: state.node_id.clone(),
+        sender_pubkey: crypto::public_b64(&state.public),
+        recipient_id: recipient_id.to_string(),
+        ttl: 4, // smaller TTL for location updates to reduce mesh flood
+        ciphertext: Some(ciphertext),
+        nonce: Some(nonce),
+        plain_presence_name: None,
+        ack_msg_id: None,
+    };
+    state.mark_seen(&envelope.msg_id);
+    relay(state, &envelope, None);
+    Ok(envelope.msg_id.clone())
+}
+
+pub fn send_ack(state: &MeshState, recipient_id: &str, ack_for_msg_id: &str) {
+    let envelope = MeshEnvelope {
+        msg_id: uuid::Uuid::new_v4().to_string(),
+        msg_type: "ack".into(),
+        sender_id: state.node_id.clone(),
+        sender_pubkey: crypto::public_b64(&state.public),
+        recipient_id: recipient_id.to_string(),
+        ttl: MAX_TTL,
+        ciphertext: None,
+        nonce: None,
+        plain_presence_name: None,
+        ack_msg_id: Some(ack_for_msg_id.to_string()),
+    };
+    state.mark_seen(&envelope.msg_id);
+    relay(state, &envelope, None);
 }
 
 #[allow(dead_code)]
@@ -281,16 +331,59 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
                             let _ = app.emit(
                                 "message_received",
                                 serde_json::json!({
-                                    "id": format!("msg-{}", now),
+                                    "id": envelope.msg_id.clone(),
                                     "peerId": envelope.sender_id,
                                     "text": text,
                                     "timestamp": format!("{}", now)
                                 }),
                             );
+                            
+                            // Send ACK back
+                            send_ack(state, &envelope.sender_id, &envelope.msg_id);
                         }
                     }
                 }
                 return; // jestesmy celem - koniec trasy, nie relayowac dalej
+            }
+        }
+        "ack" => {
+            if envelope.recipient_id == state.node_id {
+                if let Some(ack_id) = &envelope.ack_msg_id {
+                    let _ = app.emit(
+                        "message_ack_received",
+                        serde_json::json!({
+                            "msgId": ack_id,
+                            "peerId": envelope.sender_id,
+                        }),
+                    );
+                }
+                return;
+            }
+        }
+        "location" => {
+            if envelope.recipient_id == state.node_id {
+                if let (Some(ct), Some(nonce)) = (&envelope.ciphertext, &envelope.nonce) {
+                    if let Some(sender_pk) = crypto::parse_public(&envelope.sender_pubkey) {
+                        if let Some(payload) = crypto::decrypt(&state.identity, &sender_pk, ct, nonce) {
+                            // payload is lat,lon
+                            let parts: Vec<&str> = payload.split(',').collect();
+                            if parts.len() == 2 {
+                                if let (Ok(lat), Ok(lon)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                                    let _ = app.emit(
+                                        "peer_location_received",
+                                        serde_json::json!({
+                                            "peerId": envelope.sender_id,
+                                            "lat": lat,
+                                            "lon": lon,
+                                            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()
+                                        })
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
             }
         }
         _ => return,
