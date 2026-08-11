@@ -65,6 +65,27 @@ impl MeshState {
             seen_ids: Mutex::new(VecDeque::new()),
             seen_set: Mutex::new(HashSet::new()),
         }
+
+        fn resolve_recipient(state: &MeshState, recipient_id: &str) -> Result<(String, PublicKey), String> {
+            let map = state.known_pubkeys.lock().map_err(|e| e.to_string())?;
+
+            if let Some(pk) = map.get(recipient_id).cloned() {
+                return Ok((recipient_id.to_string(), pk));
+            }
+
+            let mut match_iter = map
+                .iter()
+                .filter(|(known_id, _)| known_id.ends_with(recipient_id) || recipient_id.ends_with(known_id.as_str()));
+
+            if let Some((known_id, pk)) = match_iter.next() {
+                if match_iter.next().is_some() {
+                    return Err("Niejednoznaczny odbiorca - użyj pełnego Node ID".to_string());
+                }
+                return Ok((known_id.clone(), pk.clone()));
+            }
+
+            Err("Nieznany klucz publiczny odbiorcy - musicie byc byli chocby raz bezposrednio w zasiegu".to_string())
+        }
     }
 
     fn mark_seen(&self, id: &str) -> bool {
@@ -182,20 +203,14 @@ pub fn send_presence(state: &MeshState, to_address: &str) {
 }
 
 pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<String, String> {
-    let pubkey = {
-        let map = state.known_pubkeys.lock().map_err(|e| e.to_string())?;
-        map.get(recipient_id).cloned()
-    };
-    let pubkey = pubkey.ok_or_else(|| {
-        "Nieznany klucz publiczny odbiorcy - musicie byc byli chocby raz bezposrednio w zasiegu".to_string()
-    })?;
+    let (resolved_recipient_id, pubkey) = resolve_recipient(state, recipient_id)?;
     let (ciphertext, nonce) = crypto::encrypt(&state.identity, &pubkey, text);
     let envelope = MeshEnvelope {
         msg_id: uuid::Uuid::new_v4().to_string(),
         msg_type: "text".into(),
         sender_id: state.node_id.clone(),
         sender_pubkey: crypto::public_b64(&state.public),
-        recipient_id: recipient_id.to_string(),
+        recipient_id: resolved_recipient_id,
         ttl: MAX_TTL,
         ciphertext: Some(ciphertext),
         nonce: Some(nonce),
@@ -208,13 +223,7 @@ pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<St
 }
 
 pub fn send_location(state: &MeshState, recipient_id: &str, lat: f64, lon: f64) -> Result<String, String> {
-    let pubkey = {
-        let map = state.known_pubkeys.lock().map_err(|e| e.to_string())?;
-        map.get(recipient_id).cloned()
-    };
-    let pubkey = pubkey.ok_or_else(|| {
-        "Nieznany klucz publiczny odbiorcy".to_string()
-    })?;
+    let (resolved_recipient_id, pubkey) = resolve_recipient(state, recipient_id)?;
     let payload = format!("{},{}", lat, lon);
     let (ciphertext, nonce) = crypto::encrypt(&state.identity, &pubkey, &payload);
     let envelope = MeshEnvelope {
@@ -222,7 +231,7 @@ pub fn send_location(state: &MeshState, recipient_id: &str, lat: f64, lon: f64) 
         msg_type: "location".into(),
         sender_id: state.node_id.clone(),
         sender_pubkey: crypto::public_b64(&state.public),
-        recipient_id: recipient_id.to_string(),
+        recipient_id: resolved_recipient_id,
         ttl: 4, // smaller TTL for location updates to reduce mesh flood
         ciphertext: Some(ciphertext),
         nonce: Some(nonce),
@@ -396,4 +405,3 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
         relay(state, &forwarded, Some(from_address));
     }
 }
-

@@ -2,6 +2,11 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { meshSendText, onMessageReceived, onPeerDiscovered, onMessageAckReceived } from '../api';
 import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload } from '../types';
 
+const isSamePeerId = (a: string, b: string): boolean => {
+  if (!a || !b) return false;
+  return a === b || a.endsWith(b) || b.endsWith(a);
+};
+
 export function useChats() {
   const [chats, setChats] = useState<Chat[]>([]);
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
@@ -45,12 +50,18 @@ export function useChats() {
       const peerName = payload.name || peerId;
 
       setChats(prev => {
-        const existingIndex = prev.findIndex(c => c.peerId === peerId || c.id === peerId);
+        const existingIndex = prev.findIndex(c => isSamePeerId(c.peerId, peerId) || c.id === peerId);
         if (existingIndex >= 0) {
           const existing = prev[existingIndex];
           if (existing.peerName === existing.peerId && peerName !== existing.peerId) {
             const updated = [...prev];
-            updated[existingIndex] = { ...existing, peerName };
+            updated[existingIndex] = { ...existing, peerId, peerName };
+            chatsRef.current = updated;
+            return updated;
+          }
+          if (existing.peerId !== peerId) {
+            const updated = [...prev];
+            updated[existingIndex] = { ...existing, peerId };
             chatsRef.current = updated;
             return updated;
           }
@@ -76,7 +87,7 @@ export function useChats() {
   }, []);
 
   const startChat = useCallback((peerId: string, peerName: string): string => {
-    const existing = chatsRef.current.find(c => c.peerId === peerId || c.id === peerId);
+    const existing = chatsRef.current.find(c => isSamePeerId(c.peerId, peerId) || c.id === peerId);
     if (existing) return existing.id;
 
     const chatId = 'chat-' + Date.now();
@@ -167,7 +178,7 @@ export function useChats() {
       const timestamp = isNaN(msgDate.getTime()) ? new Date() : msgDate;
 
       let chatId: string;
-      const existing = chatsRef.current.find(c => c.peerId === payload.peerId || c.id === payload.peerId);
+      const existing = chatsRef.current.find(c => isSamePeerId(c.peerId, payload.peerId) || c.id === payload.peerId);
       if (existing) {
         chatId = existing.id;
       } else {
@@ -188,12 +199,13 @@ export function useChats() {
       }));
 
       setChats(prev => {
-        const index = prev.findIndex(c => c.id === chatId || c.peerId === payload.peerId);
+        const index = prev.findIndex(c => c.id === chatId || isSamePeerId(c.peerId, payload.peerId));
         if (index >= 0) {
           return prev.map((c, i) =>
             i === index
               ? {
                   ...c,
+                  peerId: payload.peerId,
                   lastMessage: payload.text,
                   lastMessageTime: timestamp,
                   unreadCount: c.unreadCount + 1,
