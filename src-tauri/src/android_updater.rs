@@ -10,12 +10,12 @@ pub fn install_apk_jni(_app: &AppHandle, apk_path: String) -> Result<(), String>
     let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }.map_err(|e| e.to_string())?;
     let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
     
-    let class_name = "com/vortex/mesh/MainActivity";
+    let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
     let apk_path_jstring = env.new_string(apk_path).map_err(|e| e.to_string())?;
     let apk_path_jobject: jni::objects::JObject = apk_path_jstring.into();
     
-    env.call_static_method(
-        class_name,
+    env.call_method(
+        activity,
         "installApk",
         "(Ljava/lang/String;)V",
         &[JValue::Object(&apk_path_jobject)],

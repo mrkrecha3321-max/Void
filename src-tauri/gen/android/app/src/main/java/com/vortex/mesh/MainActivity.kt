@@ -101,20 +101,18 @@ class MainActivity : TauriActivity() {
     NfcManager.handleIntent(intent)
   }
 
+  fun installApk(apkPath: String) {
+    val file = File(apkPath)
+    val uri = FileProvider.getUriForFile(this, "${this.packageName}.fileprovider", file)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+      setDataAndType(uri, "application/vnd.android.package-archive")
+      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    this.startActivity(intent)
+  }
+
   companion object {
     var instance: MainActivity? = null
-
-    @JvmStatic
-    fun installApk(apkPath: String) {
-      val ctx = instance ?: return
-      val file = File(apkPath)
-      val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
-      val intent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, "application/vnd.android.package-archive")
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      }
-      ctx.startActivity(intent)
-    }
   }
 }
