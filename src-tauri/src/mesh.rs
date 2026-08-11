@@ -30,12 +30,13 @@ struct MeshEnvelope {
     sender_pubkey: String,
     recipient_id: String, // "*" dla presence
     ttl: u8,
+    #[serde(default)]
     ciphertext: Option<String>,
+    #[serde(default)]
     nonce: Option<String>,
+    #[serde(default)]
     plain_presence_name: Option<String>,
-    // For location messages, payload will be encrypted in ciphertext,
-    // but for simple ack, we can just put original msg_id in a new field or use ciphertext.
-    // Let's use an explicit field for ACK to avoid encryption overhead for simple delivery receipts.
+    #[serde(default)]
     ack_msg_id: Option<String>,
 }
 
