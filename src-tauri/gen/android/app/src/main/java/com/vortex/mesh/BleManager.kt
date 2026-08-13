@@ -31,6 +31,7 @@ object BleManager {
     private val serverConnectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
     private val peerShortIds = ConcurrentHashMap<String, String>() // shortId -> latest MAC address
     private class ChunkBuffer {
+        var msgId = -1
         var totalChunks = 0
         val chunks = mutableMapOf<Int, ByteArray>()
         var lastUpdate = System.currentTimeMillis()
@@ -100,7 +101,16 @@ object BleManager {
                 val payload = bytes.copyOfRange(4, bytes.size)
 
                 val buffer = rxBuffers.getOrPut(address) { ChunkBuffer() }
-                buffer.totalChunks = totalChunks
+                if (buffer.msgId != msgId) {
+                    // New message started (different msgId than what we were assembling) —
+                    // drop any stale/incomplete chunks from a previous message instead of
+                    // mixing them together, which previously could corrupt or prematurely
+                    // "complete" a message when two chunked sends from the same peer
+                    // (e.g. presence immediately followed by a chat message) overlapped.
+                    buffer.msgId = msgId
+                    buffer.totalChunks = totalChunks
+                    buffer.chunks.clear()
+                }
                 buffer.chunks[chunkIndex] = payload
                 buffer.lastUpdate = System.currentTimeMillis()
 
