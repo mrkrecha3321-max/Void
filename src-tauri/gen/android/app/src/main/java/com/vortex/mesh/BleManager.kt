@@ -201,7 +201,7 @@ object BleManager {
                 ) {
                     try {
                         if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                            NativeBridge.onMessageReceived(device.address, String(value, Charsets.UTF_8))
+                            handleReceivedBytes(device.address, value)
                         }
                         if (responseNeeded) {
                             gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null)
@@ -408,7 +408,7 @@ object BleManager {
             try {
                 if (characteristic.uuid == MESSAGE_CHAR_UUID) {
                     val bytes = characteristic.value ?: return
-                    NativeBridge.onMessageReceived(g.device.address, String(bytes, Charsets.UTF_8))
+                    handleReceivedBytes(g.device.address, bytes)
                 }
             } catch (e: Throwable) {}
         }
