@@ -6,7 +6,7 @@
 
 ## ⚡ O Projekcie
 
-**VOID** to zoptymalizowana aplikacja mobilna stworzona w oparciu o **Tauri v2**, **Rust** oraz **Kotlin (Android Native BLE)**, umożliwiająca bezpieczną komunikację P2P (Peer-to-Peer) w warunkach braku infrastruktury sieciowej (off-grid). 
+**VOID** to zoptymalizowana aplikacja mobilna stworzona w oparciu o **Tauri v2**, **Rust** oraz **Kotlin (Android Native BLE)**, umożliwiająca bezpieczną komunikację P2P (Peer-to-Peer) w warunkach braku infrastruktury sieciowej (off-grid).
 
 Aplikacja automatycznie wykrywa węzły w zasięgu fali radiowej Bluetooth, buduje dynamiczną siatkę Mesh i przekazuje wiadomości pomiędzy urządzeniami z pełnym szyfrowaniem End-to-End (E2EE).
 
@@ -16,7 +16,7 @@ Aplikacja automatycznie wykrywa węzły w zasięgu fali radiowej Bluetooth, budu
 
 * 🔒 **Szyfrowanie End-to-End (E2EE):** Każda wiadomość jest szyfrowana kluczami kryptograficznymi Ed25519 / X25519 przed wysłaniem w eter.
 * 🆔 **Deterministyczne ID Węzła:** Identyfikator węzła (`Node ID`) jest obliczany deterministycznie z klucza publicznego (SHA-256), co gwarantuje stałą tożsamość urządzenia bez zmiennych identyfikatorów sesji.
-* 📡 **18-bajtowy Protokół Chunkowania (MTU Agnostic):** Automatyczna fragmentacja i rejestracja bufora odbiorczego (`rxBuffers`) zapobiega utracie pakietów na ograniczeniach sprzętowych MTU w starszych i nowszych modułach BLE.
+* 📡 **Protokół chunkowania BLE:** Wiadomości są dzielone na fragmenty z 5-bajtowym nagłówkiem (1B marker + 2B Message ID + 1B Total Chunks + 1B Chunk Index) i maksymalnie 16 bajtami payloadu. Bufory odbiorcze są rozdzielane po adresie urządzenia i ID wiadomości oraz wygaszane po 30 sekundach.
 * 📲 **Wsparcie dla Android 13+ (API 33+):** Pełna zgodność z nowoczesnym API Android GATT (`writeCharacteristic` & `writeDescriptor`).
 * 🚨 **System Radarowy SOS:** Sygnał alarmowy propagowany przeskokowo w całej sieci Mesh z dynamicznym wyliczaniem dystansu i kierunku.
 * 🔄 **Automatyczne Aktualizacje OTA:** Zintegrowana obsługa aktualizacji z poziomu aplikacji pobierająca najnowsze wydania instalatorów APK z GitHub Releases.
@@ -40,7 +40,7 @@ flowchart TD
 
     subgraph Native ["Warstwa Natywna (Kotlin Android)"]
         BleMgr["BleManager (GATT Server & Client)"]
-        Chunker["18-byte Chunking Engine"]
+        Chunker["BLE Chunking Engine"]
         JNIBridge["JNI Most Dwukierunkowy"]
     end
 
@@ -55,15 +55,17 @@ flowchart TD
 
 ---
 
-## 🔄 Protokół Fragmentacji BLE (18-byte Framing)
+## 🔄 Protokół Fragmentacji BLE
 
-Aby zapewnić nieprzerwaną transmisję długich wiadomości tekstowych oraz kluczy szyfrujących bez zależności od negocjacji MTU warstwy fizycznej, zastosowaliśmy ramkę 4-bajtowego nagłówka:
+Aby zapewnić transmisję długich wiadomości bez zależności od konkretnego rozmiaru MTU, aplikacja stosuje własne ramki:
 
 ```
 +-------------------+-------------------+-------------------+-------------------+------------------------+
-| 1B: Header (0x01) | 1B: Message ID    | 1B: Total Chunks  | 1B: Chunk Index   | Max 18B: Payload Data  |
+| 1B: Marker (0x00) | 2B: Message ID    | 1B: Total Chunks  | 1B: Chunk Index   | Max 16B: Payload Data  |
 +-------------------+-------------------+-------------------+-------------------+------------------------+
 ```
+
+`Message ID` jest 16-bitowym, rosnącym licznikiem. Po odebraniu bufor jest identyfikowany przez `(adres urządzenia, Message ID)`, dzięki czemu dwa równoległe komunikaty od tego samego urządzenia nie korzystają z jednego bufora. Niedokończone bufory są automatycznie usuwane po 30 sekundach.
 
 ---
 
@@ -81,7 +83,7 @@ W projekcie skonfigurowano **GitHub Actions** (`.github/workflows/release.yml`),
    git push origin v0.0.2
    ```
 
-W ciągu kilku minut GitHub Actions zbuduje instalator `Void.apk` i opublikuje go w zakładce **Releases**. Urządzenia z zainstalowaną aplikacją automatycznie wyświetlą banner z prośbą o aktualizację.
+W ciągu kilku minut GitHub Actions zbuduje instalator `Void.apk` i opublikuje go w zakładce `Releases`. Urządzenia z zainstalowaną aplikacją automatycznie wyświetlą banner z prośbą o aktualizację.
 
 ---
 
