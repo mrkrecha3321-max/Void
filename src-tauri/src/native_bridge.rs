@@ -37,7 +37,7 @@ mod android {
     use jni::objects::{JObject, JString};
     use jni::sys::jint;
     use jni::JNIEnv;
-    use tauri::Manager;
+    use tauri::{Emitter, Manager};
 
     fn jstr(env: &mut JNIEnv, s: &JString) -> String {
         env.get_string(s).map(|v| v.into()).unwrap_or_default()
@@ -219,7 +219,7 @@ mod android {
 
     #[no_mangle]
     pub extern "system" fn Java_com_vortex_mesh_NativeBridge_setClassLoader(
-        mut env: JNIEnv,
+        env: JNIEnv,
         _this: JObject,
         class_loader: JObject,
     ) {
@@ -239,7 +239,7 @@ mod android {
 // ---- Rust -> Kotlin: wywolania na BleManager (JVM static, dzieki @JvmStatic) ----
 #[cfg(target_os = "android")]
 pub mod calls {
-    use jni::objects::{JClass, JObject, JValue};
+    use jni::objects::{JClass, JValue};
     use jni::JNIEnv;
     use jni::JavaVM;
 
