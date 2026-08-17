@@ -1,5 +1,11 @@
 import { useState, useEffect } from "react";
-import { checkForUpdates, installUpdate } from "./api";
+import {
+  checkForUpdates,
+  installUpdate,
+  onMessageReceived,
+  onSosReceived,
+  trustPeer,
+} from "./api";
 import { getVersion } from "@tauri-apps/api/app";
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { motion, AnimatePresence } from "motion/react";
@@ -28,10 +34,17 @@ interface IncomingSos {
   distance: string;
 }
 
+const parseVersion = (value: string): [number, number, number] | null => {
+  const match = value.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/);
+  if (!match) return null;
+  const parts = match.slice(1, 4).map(Number) as [number, number, number];
+  return parts.every(Number.isSafeInteger) ? parts : null;
+};
+
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { peers, connected, connectedAddresses, nodeId, error: meshError, addPeer } = useMesh();
-  const { chats, messages, sendMessage, startChat, clearAllData } = useChats();
+  const { chats, messages, sendMessage, startChat, markRead, clearAllData } = useChats();
 
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
@@ -41,6 +54,65 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
 
   useEffect(() => {
+    isPermissionGranted()
+      .then(granted => granted ? undefined : requestPermission())
+      .catch(error => console.warn('Nie udało się sprawdzić uprawnień powiadomień:', error));
+  }, []);
+
+  useEffect(() => {
+    const subscription = onMessageReceived((payload) => {
+      try {
+        const preferences = JSON.parse(localStorage.getItem('vortex-settings') || '{}') as {
+          sounds?: boolean;
+          vibrations?: boolean;
+        };
+        if (preferences.vibrations !== false) navigator.vibrate?.(120);
+        if (preferences.sounds !== false) {
+          sendNotification({ title: `Wiadomość od ${payload.peerId.slice(0, 11)}…`, body: payload.text });
+        }
+      } catch {
+        // A malformed preference must not block message delivery.
+      }
+    });
+    return () => { subscription.then(unlisten => unlisten?.()); };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const subscription = onSosReceived((payload) => {
+      if (!mounted) return;
+      const coordinates = payload.lat !== undefined && payload.lon !== undefined
+        ? `${payload.lat.toFixed(5)}, ${payload.lon.toFixed(5)}`
+        : "Brak dołączonej lokalizacji";
+      setIncomingSos({
+        name: payload.name,
+        desc: payload.description,
+        location: coordinates,
+        distance: `ID: ${payload.senderId.slice(0, 11)}…`,
+      });
+      try {
+        const preferences = JSON.parse(localStorage.getItem('vortex-settings') || '{}') as {
+          criticalSos?: boolean;
+          vibrations?: boolean;
+        };
+        if (preferences.vibrations !== false) navigator.vibrate?.([250, 100, 250, 100, 500]);
+        if (preferences.criticalSos !== false) {
+          sendNotification({
+            title: `SOS — ${payload.name}`,
+            body: payload.description,
+          });
+        }
+      } catch {
+        // The in-app SOS banner remains visible even with malformed preferences.
+      }
+    });
+    return () => {
+      mounted = false;
+      subscription.then(unlisten => unlisten?.());
+    };
+  }, []);
+
+  useEffect(() => {
     const checkVer = async () => {
       try {
         const ver = await checkForUpdates();
@@ -48,23 +120,20 @@ function App() {
         
         const currentVer = await getVersion();
         
-        // Usuwamy -beta, -alpha itp żeby został sam czysty numer
-        const cleanServerVer = ver.replace(/^v/, '').split('-')[0];
-        const cleanCurrentVer = currentVer.replace(/^v/, '').split('-')[0];
-        
-        const serverParts = cleanServerVer.split('.').map(Number);
-        const currentParts = cleanCurrentVer.split('.').map(Number);
-        
+        const serverParts = parseVersion(ver);
+        const currentParts = parseVersion(currentVer);
+        if (!serverParts || !currentParts) {
+          console.warn('Odrzucono nieprawidłową wersję release:', ver);
+          return;
+        }
+
         let isNewer = false;
-        for (let i = 0; i < Math.max(serverParts.length, currentParts.length); i++) {
-          const s = serverParts[i] || 0;
-          const c = currentParts[i] || 0;
-          if (s > c) {
+        for (let index = 0; index < 3; index++) {
+          if (serverParts[index] > currentParts[index]) {
             isNewer = true;
             break;
-          } else if (s < c) {
-            break;
           }
+          if (serverParts[index] < currentParts[index]) break;
         }
         
         if (isNewer) {
@@ -95,12 +164,14 @@ function App() {
     try {
       await installUpdate(updateVersion);
     } catch (err) {
+      alert(`Błąd podczas pobierania aktualizacji: ${String(err)}`);
+    } finally {
       setIsUpdating(false);
-      alert("Błąd podczas pobierania aktualizacji. Spróbuj ponownie.");
     }
   };
 
   const handleOpenChat = (chatId: string, peerName: string) => {
+    markRead(chatId);
     setActiveChat({ chatId, peerName });
   };
 
@@ -109,7 +180,11 @@ function App() {
   };
 
   const handleStartChat = (peerId: string, peerName: string) => {
+    if (/^VX-[0-9A-F]{32}$/i.test(peerId) && (window as any)['__TAURI_INTERNALS__']) {
+      void trustPeer(peerId).catch(error => console.warn('Nie udało się oznaczyć peera jako zaufanego:', error));
+    }
     const chatId = startChat(peerId, peerName);
+    markRead(chatId);
     setActiveTab("chats");
     setActiveChat({ chatId, peerName });
   };

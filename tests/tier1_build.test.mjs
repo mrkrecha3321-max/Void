@@ -27,7 +27,7 @@ describe('Tier 1: Build & Compilation Verification', () => {
   });
 
   it('Test 1.3: cargo check in src-tauri exits with code 0', { timeout: 180000 }, async () => {
-    const result = await runCommand('cargo', ['check'], TAURI_DIR);
+    const result = await runCommand('cargo', ['check', '--locked'], TAURI_DIR);
     assert.equal(
       result.exitCode,
       0,

@@ -4,11 +4,12 @@ import type { Peer } from '../types';
 import { Users, UserPlus, RadioReceiver, Hash, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { listen } from '@tauri-apps/api/event';
+import { importContactCard } from '../api';
 
 interface Props {
   peers: Peer[];
   onStartChat: (peerId: string, peerName: string) => void;
-  onAddPeer: (peerId: string, name: string) => void;
+  onAddPeer: (peerId: string, name: string) => void | Promise<void>;
   myNodeId?: string | null;
 }
 
@@ -20,11 +21,16 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
   const [peerIdInput, setPeerIdInput] = useState('');
   const [peerNameInput, setPeerNameInput] = useState('');
   const nfcUnlistenRef = useRef<(() => void) | null>(null);
+  const nfcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Listen for nfc_tag_read events from native NfcManager.kt when modal is open.
   // Web NFC API (NDEFReader) does NOT work in Tauri WebView — we use Tauri events instead.
   useEffect(() => {
     if (!showNfcModal) {
+      if (nfcTimerRef.current) {
+        clearTimeout(nfcTimerRef.current);
+        nfcTimerRef.current = null;
+      }
       if (nfcUnlistenRef.current) {
         nfcUnlistenRef.current();
         nfcUnlistenRef.current = null;
@@ -32,32 +38,27 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
       return;
     }
 
-    setNfcStatus('Przybliż telefony do siebie...');
+    setNfcStatus('Zbliż telefon do podpisanego tagu VOID2...');
 
-    // Subscribe to native NFC event: NfcManager.kt → Rust JNI → Tauri → here
-    listen<{ payload: string }>('nfc_tag_read', (event) => {
+    // Native NFC → Rust JNI → validated protocol-v2 contact card.
+    listen<{ payload: string }>('nfc_tag_read', async (event) => {
       try {
-        // payload can be { payload: "VORTEX:..." } or just the string
         const raw: string =
           (event.payload as any)?.payload ?? (event.payload as unknown as string);
-        if (typeof raw !== 'string' || !raw.startsWith('VORTEX:')) {
-          setNfcStatus('Niekompatybilny tag NFC');
+        if (typeof raw !== 'string' || !raw.startsWith('VOID2:')) {
+          setNfcStatus('Tag nie zawiera podpisanej wizytówki VOID2');
           return;
         }
-        // Format: VORTEX:nodeId:name  (name may contain colons)
-        const parts = raw.split(':');
-        const id   = parts[1] ?? '';
-        const name = parts.slice(2).join(':') || id.slice(0, 8);
-        setNfcStatus(`✅ Znaleziono: ${name}`);
-        setTimeout(() => {
+        const contact = await importContactCard(raw);
+        setNfcStatus(`✅ Zweryfikowano podpis: ${contact.name}`);
+        if (nfcTimerRef.current) clearTimeout(nfcTimerRef.current);
+        nfcTimerRef.current = setTimeout(() => {
           setShowNfcModal(false);
-          if (id) {
-            onAddPeer(id, name);
-            onStartChat(id, name);
-          }
-        }, 1200);
-      } catch {
-        setNfcStatus('Błąd odczytu NFC');
+          onStartChat(contact.nodeId, contact.name);
+          nfcTimerRef.current = null;
+        }, 800);
+      } catch (error) {
+        setNfcStatus(`Odrzucono tag: ${String(error)}`);
       }
     }).then(unlisten => {
       nfcUnlistenRef.current = unlisten;
@@ -66,6 +67,10 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
     });
 
     return () => {
+      if (nfcTimerRef.current) {
+        clearTimeout(nfcTimerRef.current);
+        nfcTimerRef.current = null;
+      }
       if (nfcUnlistenRef.current) {
         nfcUnlistenRef.current();
         nfcUnlistenRef.current = null;
@@ -77,15 +82,23 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
     setShowNfcModal(true);
   };
 
-  const handleAddById = (e: React.FormEvent) => {
+  const handleAddById = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!peerIdInput) return;
-    const name = peerNameInput || peerIdInput.slice(0, 8);
-    onAddPeer(peerIdInput, name);
-    onStartChat(peerIdInput, name);
-    setShowIdModal(false);
-    setPeerIdInput('');
-    setPeerNameInput('');
+    const peerId = peerIdInput.trim().toUpperCase();
+    if (!/^VX-[0-9A-F]{32}$/.test(peerId)) {
+      window.alert('Node ID musi mieć format VX- i 32 znaki szesnastkowe.');
+      return;
+    }
+    const name = (peerNameInput.trim() || peerId.slice(0, 11)).slice(0, 80);
+    try {
+      await onAddPeer(peerId, name);
+      onStartChat(peerId, name);
+      setShowIdModal(false);
+      setPeerIdInput('');
+      setPeerNameInput('');
+    } catch (error) {
+      window.alert(`Nie udało się dodać kontaktu: ${String(error)}`);
+    }
   };
 
   return (
@@ -260,7 +273,7 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               </div>
               <h2 className="text-xl font-bold mb-2">Dodawanie przez NFC</h2>
               <p className="text-muted-foreground mb-6 text-sm leading-relaxed">
-                Zbliż swój telefon do telefonu drugiej osoby z włączoną aplikacją Void, aby nawiązać bezpieczne połączenie.
+                Zbliż telefon do przygotowanego tagu NFC z profilem VOID. Połączenie i klucz zostaną uwierzytelnione dopiero przez podpisany protokół BLE.
               </p>
               <div className="w-full bg-secondary/50 rounded-xl py-3 px-4 text-sm font-semibold text-accent min-h-[44px] flex items-center justify-center">
                 {nfcStatus || 'Czekam...'}

@@ -34,6 +34,7 @@ TEST_INFRA.md
 TEST_READY.md
 
 # Editor directories and files
+.git.worktree-broken
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -43,3 +44,6 @@ TEST_READY.md
 *.njsproj
 *.sln
 *.sw?
+
+# Generated Android WebView assets
+src-tauri/gen/android/app/src/main/assets/

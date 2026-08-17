@@ -13,6 +13,17 @@ val tauriProperties = Properties().apply {
     }
 }
 
+val releaseKeystorePath = System.getenv("VOID_ANDROID_KEYSTORE_PATH")
+val releaseKeystorePassword = System.getenv("VOID_ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("VOID_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("VOID_ANDROID_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     compileSdk = 36
     namespace = "com.vortex.mesh"
@@ -23,6 +34,16 @@ android {
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = file(releaseKeystorePath!!)
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -37,7 +58,9 @@ android {
             }
         }
         getByName("release") {
-            signingConfig = signingConfigs.getByName("debug")
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
@@ -51,6 +74,18 @@ android {
     }
     buildFeatures {
         buildConfig = true
+    }
+}
+
+gradle.taskGraph.whenReady {
+    val releaseRequested = allTasks.any { task ->
+        task.project == project && task.name.contains("release", ignoreCase = true)
+    }
+    if (releaseRequested && !releaseSigningConfigured) {
+        throw GradleException(
+            "Release signing is not configured. Set VOID_ANDROID_KEYSTORE_PATH, " +
+                "VOID_ANDROID_KEYSTORE_PASSWORD, VOID_ANDROID_KEY_ALIAS and VOID_ANDROID_KEY_PASSWORD."
+        )
     }
 }
 

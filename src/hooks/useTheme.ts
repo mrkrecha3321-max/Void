@@ -3,8 +3,8 @@ import { useState, useEffect } from 'react';
 export type Theme = 'dark' | 'light';
 
 export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem('vortex-theme') as Theme) || 'dark'
+  const [theme, setTheme] = useState<Theme>(() =>
+    localStorage.getItem('vortex-theme') === 'light' ? 'light' : 'dark'
   );
 
   useEffect(() => {

@@ -7,9 +7,12 @@ interface Props {
   sent: boolean;
   timestamp: string;
   delivered?: boolean;
+  failed?: boolean;
+  queued?: boolean;
+  error?: string;
 }
 
-const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered }) => {
+const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered, failed, queued, error }) => {
   return (
     <motion.div 
       initial={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -30,8 +33,12 @@ const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered }) => {
           {timestamp}
         </span>
         {sent && (
-          <span className="text-muted-foreground">
-            {delivered ? (
+          <span className={failed ? 'text-red-500' : 'text-muted-foreground'} title={error}>
+            {failed ? (
+              <span className="text-[11px] font-semibold">Nie wysłano</span>
+            ) : queued ? (
+              <span className="text-[11px] font-semibold text-amber-500">W kolejce</span>
+            ) : delivered ? (
               <CheckCheck size={14} className="text-blue-500" />
             ) : (
               <Check size={14} />

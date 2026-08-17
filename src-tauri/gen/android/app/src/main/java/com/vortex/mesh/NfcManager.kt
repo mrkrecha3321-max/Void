@@ -43,8 +43,8 @@ object NfcManager {
 
         try {
             adapter.enableForegroundDispatch(activity, pendingIntent, filters, null)
-        } catch (e: Exception) {
-            // Silently fail — NFC dispatch failure must NOT crash the app
+        } catch (error: Exception) {
+            try { NativeBridge.onNfcError("NFC dispatch failed: ${error.message}") } catch (_: Throwable) {}
         }
     }
 
@@ -66,7 +66,7 @@ object NfcManager {
                     val msg = rawMsgs[0] as NdefMessage
                     for (record in msg.records) {
                         val text = parseNdefRecord(record) ?: continue
-                        if (text.startsWith("VORTEX:")) {
+                        if (text.startsWith("VOID2:")) {
                             NativeBridge.onNfcTagRead(text)
                             return
                         }
@@ -96,12 +96,14 @@ object NfcManager {
             message ?: return
             for (record in message.records) {
                 val text = parseNdefRecord(record) ?: continue
-                if (text.startsWith("VORTEX:")) {
+                if (text.startsWith("VOID2:")) {
                     NativeBridge.onNfcTagRead(text)
                     return
                 }
             }
-        } catch (e: Throwable) {}
+        } catch (error: Throwable) {
+            try { NativeBridge.onNfcError("NFC read failed: ${error.message}") } catch (_: Throwable) {}
+        }
     }
 
     /**

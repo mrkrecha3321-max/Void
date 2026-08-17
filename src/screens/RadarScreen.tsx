@@ -5,6 +5,7 @@ import type { Peer } from '../types';
 import Avatar from '../components/Avatar';
 import { getCurrentPosition, checkPermissions, requestPermissions } from '@tauri-apps/plugin-geolocation';
 import { meshSendLocation } from '../api';
+import { useSettings } from '../hooks/useSettings';
 
 interface Props {
   peers: Peer[];
@@ -53,8 +54,11 @@ export const calculateDistanceRssi = (
 
 const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
   const [scanning, setScanning] = useState(true);
+  const { settings, updateSetting } = useSettings();
+  const sharingLocation = settings.locationSharing;
   const [myLat, setMyLat] = useState<number | null>(null);
   const [myLon, setMyLon] = useState<number | null>(null);
+  const [locationRecipients, setLocationRecipients] = useState<Set<string>>(() => new Set());
 
   React.useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -76,10 +80,16 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
               setMyLat(pos.coords.latitude);
               setMyLon(pos.coords.longitude);
 
-              // Ping to all known peers
-              peers.filter(p => p.online).forEach(p => {
-                meshSendLocation(p.id, pos.coords.latitude, pos.coords.longitude).catch(() => {});
-              });
+              // Location is shared only after an explicit user opt-in.
+              if (sharingLocation) {
+                peers.filter(peer =>
+                  peer.online && /^VX-[0-9A-F]{32}$/i.test(peer.id) && locationRecipients.has(peer.id)
+                ).forEach(peer => {
+                  meshSendLocation(peer.id, pos.coords.latitude, pos.coords.longitude).catch((error) => {
+                    console.warn(`Nie udało się udostępnić lokalizacji ${peer.id}:`, error);
+                  });
+                });
+              }
             }
           } catch (e) {
             console.warn("Could not fetch location", e);
@@ -101,8 +111,8 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
       active = false;
       if (interval) clearInterval(interval);
     };
-  }, [scanning, peers]);
-  
+  }, [scanning, sharingLocation, peers, locationRecipients]);
+
   // Widoczni ludzie posortowani po odległości
   const visiblePeers = peers
     .filter(p => p.online)
@@ -118,29 +128,41 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
     <div className="flex-1 flex flex-col pt-safe bg-background text-foreground h-full overflow-hidden relative">
       <header className="flex items-center justify-between px-6 py-4 border-b border-border/50 shrink-0 bg-background/80 backdrop-blur-md z-10">
         <h1 className="text-2xl font-bold tracking-tight">Radar BLE</h1>
-        <button 
-          onClick={() => setScanning(!scanning)}
-          className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${scanning ? 'bg-accent/20 text-accent' : 'bg-secondary text-muted-foreground'}`}
-        >
-          <Radio size={20} className={scanning ? 'animate-pulse' : ''} />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => updateSetting('locationSharing', !sharingLocation)}
+            className={`h-10 px-3 rounded-full flex items-center gap-2 text-xs font-semibold transition-colors ${sharingLocation ? 'bg-blue-500/20 text-blue-500' : 'bg-secondary text-muted-foreground'}`}
+            aria-pressed={sharingLocation}
+            title="Udostępnianie lokalizacji peerom"
+          >
+            <MapPin size={16} />
+            {sharingLocation ? `GPS: ${locationRecipients.size} odb.` : 'GPS prywatny'}
+          </button>
+          <button
+            onClick={() => setScanning(!scanning)}
+            className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${scanning ? 'bg-accent/20 text-accent' : 'bg-secondary text-muted-foreground'}`}
+            aria-label={scanning ? 'Zatrzymaj radar' : 'Uruchom radar'}
+          >
+            <Radio size={20} className={scanning ? 'animate-pulse' : ''} />
+          </button>
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto relative z-0 flex flex-col">
         {/* Radar Animation Area */}
         <div className="relative w-full h-64 flex items-center justify-center shrink-0 border-b border-border/30 overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-b from-accent/5 to-transparent pointer-events-none" />
-          
+
           <div className="relative w-40 h-40 flex items-center justify-center">
             {scanning && (
               <>
-                <motion.div 
+                <motion.div
                   initial={{ scale: 0.8, opacity: 0.8 }}
                   animate={{ scale: 3, opacity: 0 }}
                   transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
                   className="absolute inset-0 rounded-full border-2 border-accent"
                 />
-                <motion.div 
+                <motion.div
                   initial={{ scale: 0.8, opacity: 0.8 }}
                   animate={{ scale: 3, opacity: 0 }}
                   transition={{ duration: 2, repeat: Infinity, ease: "linear", delay: 1 }}
@@ -148,7 +170,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
                 />
               </>
             )}
-            
+
             <div className="w-16 h-16 bg-accent rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(var(--accent),0.5)] z-10">
               <Zap size={32} className="text-accent-foreground" />
             </div>
@@ -192,6 +214,23 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
                       ID: {peer.id.slice(0, 8).toUpperCase()}
                     </p>
                   </div>
+                  {/^VX-[0-9A-F]{32}$/i.test(peer.id) && (
+                    <button
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setLocationRecipients(previous => {
+                          const next = new Set(previous);
+                          if (next.has(peer.id)) next.delete(peer.id); else next.add(peer.id);
+                          return next;
+                        });
+                      }}
+                      aria-pressed={locationRecipients.has(peer.id)}
+                      title="Zezwól temu kontaktowi na odbiór lokalizacji"
+                      className={`w-9 h-9 rounded-full flex items-center justify-center ${locationRecipients.has(peer.id) ? 'bg-blue-500 text-white' : 'bg-background text-muted-foreground'}`}
+                    >
+                      <MapPin size={16} />
+                    </button>
+                  )}
                 </motion.div>
               ))
             )}

@@ -1,115 +1,112 @@
 # VOID 🌌
 
-> **Zdecentralizowana, szyfrowana sieć komunikacyjna Mesh oparta na technologii Bluetooth Low Energy (BLE). Komunikacja bez dostępu do Internetu, Wi-Fi oraz sieci komórkowych.**
+> Eksperymentalny komunikator mesh dla Androida wykorzystujący Bluetooth Low Energy, Tauri, Rust, Kotlin i React.
 
----
+VOID umożliwia komunikację bez Wi-Fi i sieci komórkowej. Wiadomości są szyfrowane przed przekazaniem do transportu BLE, a koperty protokołu v2 są podpisywane kluczem tożsamości.
 
-## ⚡ O Projekcie
+> [!IMPORTANT]
+> Projekt nie przeszedł jeszcze niezależnego audytu kryptograficznego ani pełnych testów na szerokiej macierzy urządzeń BLE. Nie należy traktować go jako jedynego kanału komunikacji ratunkowej.
 
-**VOID** to zoptymalizowana aplikacja mobilna stworzona w oparciu o **Tauri v2**, **Rust** oraz **Kotlin (Android Native BLE)**, umożliwiająca bezpieczną komunikację P2P (Peer-to-Peer) w warunkach braku infrastruktury sieciowej (off-grid).
+## Architektura bezpieczeństwa protokołu v2
 
-Aplikacja automatycznie wykrywa węzły w zasięgu fali radiowej Bluetooth, buduje dynamiczną siatkę Mesh i przekazuje wiadomości pomiędzy urządzeniami z pełnym szyfrowaniem End-to-End (E2EE).
+- **Tożsamość:** Ed25519 służy do podpisywania kopert.
+- **Node ID:** `VX-` oraz 128 bitów skrótu SHA-256 klucza publicznego Ed25519.
+- **Szyfrowanie wiadomości:** X25519 + HKDF-SHA-256 oraz kaskada AES-256-GCM/ChaCha20-Poly1305.
+- **Uwierzytelnienie:** podpis obejmuje nadawcę, odbiorcę, typ, czas, ciphertext, nonce, maksymalną liczbę hopów i identyfikator wiadomości.
+- **Routing:** podpisany limit maksymalny oraz osobny, malejący licznik pozostałych hopów.
+- **Ochrona wejścia:** limity rozmiaru, TTL, liczby peerów, rate limiting oraz odrzucanie starych i niepodpisanych kopert.
+- **Panic wipe:** usuwa trwałą tożsamość, czyści stan i zamyka proces.
 
----
+Protokół v2 celowo nie przyjmuje kopert ze starego, niepodpisanego formatu.
 
-## 🌟 Główne Cechy Architektoniczne
+### Czego projekt obecnie nie obiecuje
 
-* 🔒 **Szyfrowanie End-to-End (E2EE):** Każda wiadomość jest szyfrowana kluczami kryptograficznymi Ed25519 / X25519 przed wysłaniem w eter.
-* 🆔 **Deterministyczne ID Węzła:** Identyfikator węzła (`Node ID`) jest obliczany deterministycznie z klucza publicznego (SHA-256), co gwarantuje stałą tożsamość urządzenia bez zmiennych identyfikatorów sesji.
-* 📡 **Protokół chunkowania BLE:** Wiadomości są dzielone na fragmenty z 5-bajtowym nagłówkiem (1B marker + 2B Message ID + 1B Total Chunks + 1B Chunk Index) i maksymalnie 16 bajtami payloadu. Bufory odbiorcze są rozdzielane po adresie urządzenia i ID wiadomości oraz wygaszane po 30 sekundach.
-* 📲 **Wsparcie dla Android 13+ (API 33+):** Pełna zgodność z nowoczesnym API Android GATT (`writeCharacteristic` & `writeDescriptor`).
-* 🚨 **System Radarowy SOS:** Sygnał alarmowy propagowany przeskokowo w całej sieci Mesh z dynamicznym wyliczaniem dystansu i kierunku.
-* 🔄 **Automatyczne Aktualizacje OTA:** Zintegrowana obsługa aktualizacji z poziomu aplikacji pobierająca najnowsze wydania instalatorów APK z GitHub Releases.
+- Nie jest to kryptografia post-quantum.
+- Obecny schemat nie jest pełnym Double Ratchet i nie zapewnia właściwości komunikatorów opartych o Signal Protocol.
+- Kopia tożsamości jest szyfrowana hasłem (PBKDF2-HMAC-SHA-256 + ChaCha20-Poly1305), ale nie obejmuje historii czatów ani lokalnych pinów.
 
----
+## Transport BLE
 
-## 📐 Architektura Systemu
+Każda wiadomość jest ramkowana, również gdy mieści się w jednym fragmencie:
 
-```mermaid
-flowchart TD
-    subgraph UI ["Warstwa Interfejsu (React + TypeScript)"]
-        ReactUI["React 18 / Tailwind Design System"]
-        Hooks["Custom Hooks (useMesh, useChats, useTheme)"]
-    end
-
-    subgraph Core ["Warstwa Logiki (Rust Core - Tauri v2)"]
-        TauriCmds["Tauri Commands & State Management"]
-        Crypto["Moduł Kryptografii (Ed25519 + SHA-256)"]
-        Updater["GitHub Auto-Updater"]
-    end
-
-    subgraph Native ["Warstwa Natywna (Kotlin Android)"]
-        BleMgr["BleManager (GATT Server & Client)"]
-        Chunker["BLE Chunking Engine"]
-        JNIBridge["JNI Most Dwukierunkowy"]
-    end
-
-    ReactUI <--> Hooks
-    Hooks <--> TauriCmds
-    TauriCmds <--> Crypto
-    TauriCmds <--> Updater
-    TauriCmds <--> JNIBridge
-    JNIBridge <--> BleMgr
-    BleMgr <--> Chunker
-```
-
----
-
-## 🔄 Protokół Fragmentacji BLE
-
-Aby zapewnić transmisję długich wiadomości bez zależności od konkretnego rozmiaru MTU, aplikacja stosuje własne ramki:
-
-```
+```text
 +-------------------+-------------------+-------------------+-------------------+------------------------+
-| 1B: Marker (0x00) | 2B: Message ID    | 1B: Total Chunks  | 1B: Chunk Index   | Max 16B: Payload Data  |
+| 1B marker (0x00)  | 2B Message ID     | 1B total chunks   | 1B chunk index    | max 16B payload        |
 +-------------------+-------------------+-------------------+-------------------+------------------------+
 ```
 
-`Message ID` jest 16-bitowym, rosnącym licznikiem. Po odebraniu bufor jest identyfikowany przez `(adres urządzenia, Message ID)`, dzięki czemu dwa równoległe komunikaty od tego samego urządzenia nie korzystają z jednego bufora. Niedokończone bufory są automatycznie usuwane po 30 sekundach.
+- maksymalnie 255 fragmentów i 4080 bajtów wiadomości transportowej;
+- bufory są izolowane przez `(adres urządzenia, Message ID)`;
+- niedokończone bufory wygasają po 30 sekundach;
+- obowiązują limity globalne i per urządzenie;
+- zapisy GATT i notyfikacje korzystają z kolejki — kolejny fragment startuje dopiero po callbacku poprzedniego;
+- nieudane fragmenty są ponawiane z limitem prób.
 
----
+## Lokalny zaszyfrowany vault
 
-## 🚀 Automatyczny Proces Wydawania Wersji (CI/CD)
+Dane aplikacji są zapisywane w uwierzytelnionym vault szyfrowanym kluczem wyprowadzonym z lokalnej tożsamości. Vault przechowuje:
 
-W projekcie skonfigurowano **GitHub Actions** (`.github/workflows/release.yml`), które automatycznie buduje zoptymalizowane pod procesory `AArch64` pliki `.apk` przy każdym nowym tagu wersji.
+- piny kluczy i zaufane kontakty;
+- ustawienia core;
+- historię czatów z limitem rozmiaru;
+- podpisane ciphertexty oczekujące w outbox.
 
-### Wydanie Nowej Wersji w 3 Krokach:
+Replay ID są dopisywane do osobnego, szyfrowanego i okresowo kompaktowanego logu. Outbox jest ponawiany po reconnect i okresowo aż do otrzymania podpisanego ACK albo wygaśnięcia.
 
-1. **Zwiększ wersję** w plikach `package.json` oraz `src-tauri/tauri.conf.json` (np. na `0.0.2`).
-2. **Commit & Push** zmian do gałęzi `main`.
-3. **Stwórz i wyślij Tag:**
-   ```bash
-   git tag v0.0.2
-   git push origin v0.0.2
-   ```
+Podpisana wizytówka `VOID2:` zawiera Node ID oraz oba klucze publiczne. Jest używana przez QR i fizyczne tagi NFC; import zawsze weryfikuje podpis w Rust.
 
-W ciągu kilku minut GitHub Actions zbuduje instalator `Void.apk` i opublikuje go w zakładce `Releases`. Urządzenia z zainstalowaną aplikacją automatycznie wyświetlą banner z prośbą o aktualizację.
+## SOS
 
----
+SOS jest podpisanym broadcastem protokołu mesh z limitem 32 hopów. Zawiera nazwę, opis do 200 znaków i opcjonalne współrzędne. Wysyłanie ma cooldown, a odbiorca ogranicza częstotliwość alarmów od jednego nadawcy.
 
-## 🛠️ Budowanie Lokalne
+Treść SOS jest jawna dla węzłów przekazujących — jest podpisana, ale nie jest szyfrowana do jednego odbiorcy. Funkcja wymaga co najmniej jednego aktywnego połączenia BLE.
 
-### Wymagania:
-* Node.js v20+
-* Rust (wersja stable z docelowymi architekturami androida)
-* Android SDK & NDK (v27)
+## Aktualizacje Android
 
-### Komendy:
+APK z GitHub Releases musi być podpisany stałym release keystore. Workflow:
+
+1. wymaga sekretów podpisujących;
+2. sprawdza zgodność taga z wersją npm/Tauri/Cargo;
+3. wykonuje build, testy i audyty;
+4. publikuje `Void.apk` oraz `Void.apk.sha256`;
+5. updater sprawdza status HTTP, rozmiar i SHA-256 przed przekazaniem APK instalatorowi Androida.
+
+Konfiguracja sekretów jest opisana w [`docs/RELEASE_ANDROID.md`](docs/RELEASE_ANDROID.md). Klucza prywatnego nie wolno commitować do repozytorium.
+
+## Budowanie lokalne
+
+### Wymagania
+
+- Node.js 20+
+- Rust stable
+- Java 17
+- Android SDK oraz NDK `27.0.12077973`
+
 ```bash
-# Instalacja zależności
-npm install
-
-# Kompilacja warstwy Frontendowej
+npm ci
 npm run build
+npm run test:e2e
 
-# Budowanie pakietu Android APK
-npm run tauri android build -- --target aarch64
+cd src-tauri
+cargo fmt --all -- --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
----
+Build produkcyjny Androida wymaga zmiennych release signing opisanych w dokumentacji. Do developmentu można używać standardowego debug builda.
 
-## 📄 Licencja
+## Testowanie BLE
 
-Projekt objęty licencją **Open Source (Non-Commercial)**.
+Testy kontraktowe w `tests/` nie zastępują testu sprzętowego. Przed wydaniem należy sprawdzić co najmniej:
 
-Każdy użytkownik ma prawo do swobodnego pobierania, kopiowania, modyfikowania, rozwijania i tworzenia własnych wersji tego oprogramowania, **pod warunkiem, że aplikacja oraz jej modyfikacje NIGDY nie będą wykorzystywane w celach komercyjnych, płatnych lub odpłatnie dystrybuowane**.
+- dwa różne modele telefonów;
+- Android API 31, 33 i najnowsze wspierane API;
+- wiadomości jedno- i wielofragmentowe;
+- rozłączenie w środku transmisji;
+- ponowne połączenie i wymianę presence;
+- relay przez trzeci telefon;
+- upgrade APK bez odinstalowania poprzedniej wersji.
+
+## Licencja
+
+Szczegóły znajdują się w pliku [`LICENSE`](LICENSE).

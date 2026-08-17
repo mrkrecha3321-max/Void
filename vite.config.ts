@@ -18,7 +18,7 @@ export default defineConfig(async () => ({
     port: 3000,
     strictPort: true,
     host: "0.0.0.0",
-    allowedHosts: "all",
+    allowedHosts: ["localhost", ".e2b.app", ...(host ? [host] : [])],
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],

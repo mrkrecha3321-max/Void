@@ -1,17 +1,26 @@
 import React, { useState } from 'react';
 import Avatar from '../components/Avatar';
-import { triggerPanic } from '../api';
+import {
+  exportIdentityBackup,
+  getContactCard,
+  importIdentityBackup,
+  meshSendSos,
+  setNodeName,
+  triggerPanic,
+} from '../api';
 import type { Theme } from '../hooks/useTheme';
 import { useSettings } from '../hooks/useSettings';
 import { 
   Moon, Bell, Info, Settings, ShieldAlert, Cpu, 
   Radio, Zap, Shield, EyeOff, MessageSquareOff, Trash2, 
-  Vibrate, Volume2, AlertTriangle, Send, MapPin, X, ChevronLeft, Download, Key
+  Vibrate, Volume2, AlertTriangle, Send, MapPin, X, ChevronLeft,
+  Download, Key, Upload
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
 import { useProfile } from '../hooks/useProfile';
 import { getVersion } from '@tauri-apps/api/app';
+import { checkPermissions, getCurrentPosition, requestPermissions } from '@tauri-apps/plugin-geolocation';
 
 interface Props {
   theme: Theme;
@@ -39,6 +48,12 @@ const MenuScreen: React.FC<Props> = ({
   const [editProfile, setEditProfile] = useState(false);
   const [tempName, setTempName] = useState('');
   const [tempAvatar, setTempAvatar] = useState('');
+  const [showBackup, setShowBackup] = useState(false);
+  const [backupPassword, setBackupPassword] = useState('');
+  const [backupConfirmation, setBackupConfirmation] = useState('');
+  const [backupImport, setBackupImport] = useState('');
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupError, setBackupError] = useState('');
 
   // SOS Modal State
   const [showSos, setShowSos] = useState(false);
@@ -46,49 +61,119 @@ const MenuScreen: React.FC<Props> = ({
   const [sosDesc, setSosDesc] = useState('');
   const [sendingSos, setSendingSos] = useState(false);
   const [appVersion, setAppVersion] = useState('');
+  const [contactCard, setContactCard] = useState('');
 
   React.useEffect(() => {
     getVersion().then(v => setAppVersion(v)).catch(console.error);
   }, []);
 
-  const handleExportKeys = () => {
-    const mockKeys = {
-      privateKey: "E2EE-PRIV-MOCK-" + Math.random().toString(36).substring(2),
-      publicKey: "E2EE-PUB-MOCK-" + Math.random().toString(36).substring(2),
-      nodeId: nodeId
-    };
-    const blob = new Blob([JSON.stringify(mockKeys, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `vortex_keys_${nodeId || 'backup'}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    window.alert('Klucze zostały wyeksportowane do pliku backupu.');
+  React.useEffect(() => {
+    if (!(window as any)['__TAURI_INTERNALS__']) {
+      setContactCard(nodeId || '');
+      return;
+    }
+    getContactCard().then(setContactCard).catch(error => {
+      console.error('Nie udało się utworzyć podpisanej wizytówki:', error);
+      setContactCard('');
+    });
+  }, [nodeId, profile.displayName]);
+
+  const handleExportBackup = async () => {
+    if (backupPassword.length < 12 || backupPassword !== backupConfirmation) {
+      setBackupError('Hasło musi mieć minimum 12 znaków i oba pola muszą być identyczne.');
+      return;
+    }
+    setBackupBusy(true);
+    setBackupError('');
+    try {
+      const backupJson = await exportIdentityBackup(backupPassword);
+      const blob = new Blob([backupJson], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `void-identity-${nodeId || 'backup'}.json`;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+      setBackupPassword('');
+      setBackupConfirmation('');
+      setShowBackup(false);
+    } catch (error) {
+      setBackupError(String(error));
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportBackup = async () => {
+    if (!backupImport || backupPassword.length < 12) {
+      setBackupError('Wybierz plik i podaj hasło kopii.');
+      return;
+    }
+    if (!window.confirm('Import zastąpi obecną tożsamość i usunie lokalne czaty oraz piny. Kontynuować?')) return;
+    setBackupBusy(true);
+    setBackupError('');
+    try {
+      await importIdentityBackup(backupImport, backupPassword);
+      localStorage.clear();
+      sessionStorage.clear();
+      window.alert('Tożsamość została przywrócona. Aplikacja zostanie zamknięta.');
+    } catch (error) {
+      setBackupError(String(error));
+      setBackupBusy(false);
+    }
   };
 
   const handlePanic = async () => {
     const confirmed = window.confirm(
-      'Czy na pewno?\n\nTa operacja jest nieodwracalna i usunie wszystkie klucze szyfrowania z pamięci urządzenia.'
+      'Czy na pewno?\n\nTo trwale usunie tożsamość kryptograficzną. Aplikacja zostanie zamknięta, a przy następnym uruchomieniu utworzy nowy Node ID.'
     );
-    if (confirmed) {
+    if (!confirmed) return;
+
+    try {
       await triggerPanic();
       onPanic?.();
-      window.alert('Czyszczenie zakończone. Klucze i czaty zostały usunięte.');
+      localStorage.clear();
+      sessionStorage.clear();
+      window.alert('Tożsamość została usunięta. Aplikacja zostanie zamknięta.');
+    } catch (error) {
+      window.alert(`Nie udało się usunąć tożsamości: ${String(error)}`);
     }
   };
 
-  const handleSendSos = () => {
-    if (!sosName.trim() || !sosDesc.trim()) return;
+  const handleSendSos = async () => {
+    if (!sosName.trim() || !sosDesc.trim() || sendingSos) return;
     setSendingSos(true);
-    // Mock sending SOS
-    setTimeout(() => {
-      setSendingSos(false);
+    try {
+      let lat: number | undefined;
+      let lon: number | undefined;
+      try {
+        let permissions = await checkPermissions();
+        if (permissions.location === 'prompt' || permissions.location === 'prompt-with-rationale') {
+          permissions = await requestPermissions(['location', 'coarseLocation']);
+        }
+        if (permissions.location === 'granted' || permissions.coarseLocation === 'granted') {
+          const position = await getCurrentPosition({
+            enableHighAccuracy: true,
+            timeout: 8_000,
+            maximumAge: 30_000,
+          });
+          lat = position.coords.latitude;
+          lon = position.coords.longitude;
+        }
+      } catch (locationError) {
+        console.warn('SOS zostanie wysłany bez lokalizacji:', locationError);
+      }
+
+      await meshSendSos(sosName.trim(), sosDesc.trim(), lat, lon);
       setShowSos(false);
       setSosName('');
       setSosDesc('');
-      window.alert('Sygnał SOS został rozesłany w sieci Mesh (128 skoków).');
-    }, 1500);
+      window.alert('Podpisany sygnał SOS został zakolejkowany w sieci Mesh.');
+    } catch (error) {
+      window.alert(`Nie udało się wysłać SOS: ${String(error)}`);
+    } finally {
+      setSendingSos(false);
+    }
   };
 
 
@@ -181,7 +266,7 @@ const MenuScreen: React.FC<Props> = ({
           <div className="flex-1 ml-4 flex flex-col">
             <span className="text-lg font-bold text-red-500">Nadaj sygnał SOS</span>
             <span className="text-sm text-red-500/80">
-              Rozgłasza do wszystkich w zasięgu (128 skoków)
+              Rozgłasza do wszystkich w zasięgu (32 skoki)
             </span>
           </div>
         </motion.div>
@@ -262,6 +347,7 @@ const MenuScreen: React.FC<Props> = ({
       value={tempName}
       onChange={(e) => setTempName(e.target.value)}
       placeholder="Nazwa wyświetlana"
+      maxLength={80}
       className="w-full bg-secondary text-foreground rounded-xl px-4 py-3 outline-none focus:ring-2 focus:ring-accent"
     />
     <div className="flex flex-col gap-2 mt-2">
@@ -286,9 +372,16 @@ const MenuScreen: React.FC<Props> = ({
                         Anuluj
                       </button>
                       <button 
-                        onClick={() => {
-                          updateProfile({ displayName: tempName, avatarLetter: tempAvatar });
-                          setEditProfile(false);
+                        onClick={async () => {
+                          const normalizedName = tempName.trim();
+                          if (!normalizedName) return;
+                          try {
+                            await setNodeName(normalizedName);
+                            updateProfile({ displayName: normalizedName, avatarLetter: tempAvatar });
+                            setEditProfile(false);
+                          } catch (error) {
+                            window.alert(`Nie udało się zmienić nazwy węzła: ${String(error)}`);
+                          }
                         }}
                         className="flex-1 bg-accent text-white rounded-xl py-2 font-semibold shadow-md"
                       >
@@ -344,19 +437,19 @@ const MenuScreen: React.FC<Props> = ({
                     <div className="text-center mb-3">
                       <span className="text-black font-bold text-sm">Zeskanuj mój profil</span>
                     </div>
-                    {nodeId ? (
-                       <QRCodeSVG value={nodeId} size={150} level="M" />
+                    {contactCard ? (
+                       <QRCodeSVG value={contactCard} size={150} level="M" />
                     ) : (
                        <div className="w-[150px] h-[150px] flex items-center justify-center bg-gray-200 rounded-lg text-gray-500 text-xs text-center">Brak ID</div>
                     )}
                   </div>
-                  
-                  <button 
-                    onClick={handleExportKeys}
+
+                  <button
+                    onClick={() => { setBackupError(''); setShowBackup(true); }}
                     className="mt-2 w-full bg-secondary/50 hover:bg-secondary text-foreground rounded-xl py-3 px-4 flex items-center justify-center gap-2 transition-colors border border-border/50"
                   >
                     <Key size={18} className="text-accent" />
-                    <span className="font-semibold text-sm">Eksportuj klucze E2EE</span>
+                    <span className="font-semibold text-sm">Szyfrowana kopia tożsamości</span>
                     <Download size={16} className="text-muted-foreground ml-auto" />
                   </button>
                   </>
@@ -370,7 +463,7 @@ const MenuScreen: React.FC<Props> = ({
               {renderToggle(<Moon size={20} />, 'Motyw Aplikacji', theme === 'dark' ? 'Ciemny motyw' : 'Jasny motyw', theme === 'dark', toggleTheme)}
               {renderToggle(<Vibrate size={20} />, 'Wibracje', 'Wibracje przy nowej wiadomości', settings.vibrations, (val) => updateSetting('vibrations', val))}
               {renderToggle(<Volume2 size={20} />, 'Dźwięki', 'Odtwarzaj dźwięki powiadomień', settings.sounds, (val) => updateSetting('sounds', val))}
-              {renderToggle(<Bell size={20} />, 'Powiadomienia SOS', 'Omijaj wyciszenie dla sygnałów SOS', settings.criticalSos, (val) => updateSetting('criticalSos', val), true)}
+              {renderToggle(<Bell size={20} />, 'Powiadomienia SOS', 'Pokazuj systemowe powiadomienie dla sygnałów SOS', settings.criticalSos, (val) => updateSetting('criticalSos', val), true)}
 
               <div className="px-6 pt-6 pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
                 Ustawienia Sieci Mesh (BLE)
@@ -395,7 +488,7 @@ const MenuScreen: React.FC<Props> = ({
                   <span className="text-base font-semibold text-foreground">Skoki BLE Mesh (Tryb SOS)</span>
                   <span className="text-sm text-muted-foreground mt-0.5">Zwiększony zasięg dla alarmów</span>
                 </div>
-                <span className="text-lg font-bold text-red-500 bg-red-500/10 px-3 py-1 rounded-lg">128</span>
+                <span className="text-lg font-bold text-red-500 bg-red-500/10 px-3 py-1 rounded-lg">32</span>
               </div>
 
               {renderToggle(<Radio size={20} />, 'Relay Node', 'Zezwalaj na retransmisję obcych wiadomości', settings.relayNode, (val) => updateSetting('relayNode', val))}
@@ -405,13 +498,81 @@ const MenuScreen: React.FC<Props> = ({
                 Prywatność i Bezpieczeństwo
               </div>
 
-              {renderToggle(<Shield size={20} />, 'Tylko E2EE', 'Wymuszaj szyfrowane wiadomości', settings.forceEncrypted, (val) => updateSetting('forceEncrypted', val))}
+              <div className="flex items-center px-6 py-4 border-b border-border/10">
+                <div className="w-10 h-10 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center"><Shield size={20} /></div>
+                <div className="flex-1 ml-4">
+                  <div className="font-semibold">E2EE wymagane</div>
+                  <div className="text-sm text-muted-foreground">Niepodpisane i nieszyfrowane wiadomości są zawsze odrzucane</div>
+                </div>
+                <span className="text-xs font-bold text-emerald-500">ZAWSZE</span>
+              </div>
               {renderToggle(<EyeOff size={20} />, 'Ukryty Węzeł', 'Nie pokazuj na liście publicznej', settings.hideNode, (val) => updateSetting('hideNode', val))}
               {renderToggle(<MessageSquareOff size={20} />, 'Anti-Spam', 'Automatycznie odrzucaj nowe czaty', settings.rejectNewChats, (val) => updateSetting('rejectNewChats', val))}
               {renderToggle(<Trash2 size={20} />, 'Auto-destrukcja', 'Usuwaj wiadomości po 24 godzinach', settings.autoDestruct, (val) => updateSetting('autoDestruct', val))}
               <div className="h-12" />
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Encrypted identity backup */}
+      <AnimatePresence>
+        {showBackup && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              className="absolute inset-0 bg-background/80 backdrop-blur-sm"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              onClick={() => !backupBusy && setShowBackup(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }}
+              className="relative w-full max-w-md bg-secondary rounded-3xl p-6 shadow-2xl border border-border max-h-[90vh] overflow-y-auto"
+            >
+              <div className="flex items-center justify-between mb-5">
+                <div className="flex items-center gap-3"><Key className="text-accent" /><h2 className="text-xl font-bold">Kopia tożsamości</h2></div>
+                <button onClick={() => !backupBusy && setShowBackup(false)} aria-label="Zamknij"><X /></button>
+              </div>
+              <p className="text-sm text-muted-foreground mb-4">
+                Plik zawiera klucze zaszyfrowane ChaCha20-Poly1305. Hasło jest wzmacniane przez PBKDF2-HMAC-SHA-256 i nigdy nie jest zapisywane.
+              </p>
+              <label className="text-xs font-bold uppercase text-muted-foreground">Hasło — minimum 12 znaków</label>
+              <input
+                type="password" value={backupPassword} onChange={event => setBackupPassword(event.target.value)}
+                autoComplete="new-password" maxLength={256}
+                className="mt-1 mb-3 w-full bg-background border border-border rounded-xl px-4 py-3"
+              />
+              <label className="text-xs font-bold uppercase text-muted-foreground">Powtórz hasło do eksportu</label>
+              <input
+                type="password" value={backupConfirmation} onChange={event => setBackupConfirmation(event.target.value)}
+                autoComplete="new-password" maxLength={256}
+                className="mt-1 mb-3 w-full bg-background border border-border rounded-xl px-4 py-3"
+              />
+              <button
+                disabled={backupBusy}
+                onClick={handleExportBackup}
+                className="w-full bg-accent text-white rounded-xl py-3 font-bold flex items-center justify-center gap-2 disabled:opacity-50"
+              ><Download size={18} />Eksportuj zaszyfrowany plik</button>
+
+              <div className="h-px bg-border my-5" />
+              <label className="text-xs font-bold uppercase text-muted-foreground">Importuj plik kopii</label>
+              <input
+                type="file" accept="application/json,.json"
+                className="mt-2 mb-3 block w-full text-sm"
+                onChange={event => {
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  if (file.size > 16 * 1024) { setBackupError('Plik kopii jest zbyt duży.'); return; }
+                  file.text().then(setBackupImport).catch(error => setBackupError(String(error)));
+                }}
+              />
+              <button
+                disabled={backupBusy || !backupImport}
+                onClick={handleImportBackup}
+                className="w-full bg-red-500 text-white rounded-xl py-3 font-bold flex items-center justify-center gap-2 disabled:opacity-50"
+              ><Upload size={18} />Importuj i zastąp tożsamość</button>
+              {backupError && <p className="mt-3 text-sm text-red-500 break-words">{backupError}</p>}
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 
@@ -450,7 +611,7 @@ const MenuScreen: React.FC<Props> = ({
               </div>
 
               <div className="text-sm text-muted-foreground leading-relaxed">
-                Nadanie sygnału SOS wykorzysta maksymalną moc sieci Mesh (128 skoków), omijając filtry, by dotrzeć do wszystkich w promieniu kilku kilometrów. Używaj tylko w razie zagrożenia.
+                Nadanie sygnału SOS wykorzysta maksymalną moc sieci Mesh (32 skoki), omijając filtry, by dotrzeć do wszystkich w promieniu kilku kilometrów. Używaj tylko w razie zagrożenia.
               </div>
 
               <div className="flex flex-col gap-4 mt-2">
@@ -459,7 +620,8 @@ const MenuScreen: React.FC<Props> = ({
                   <input 
                     type="text" 
                     value={sosName}
-                    onChange={(e) => setSosName(e.target.value)}
+                    onChange={(e) => setSosName(e.target.value.slice(0, 80))}
+                    maxLength={80}
                     placeholder="np. Jan Kowalski"
                     className="w-full bg-background border border-border/50 rounded-xl px-4 py-3 text-foreground outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
                   />
@@ -484,7 +646,7 @@ const MenuScreen: React.FC<Props> = ({
                   </div>
                   <div className="flex flex-col">
                     <span className="text-sm font-semibold text-foreground">Lokalizacja GPS</span>
-                    <span className="text-xs text-muted-foreground">Zostanie automatycznie załączona</span>
+                    <span className="text-xs text-muted-foreground">Opcjonalna — SOS zadziała również bez GPS</span>
                   </div>
                 </div>
               </div>

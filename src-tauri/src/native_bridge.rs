@@ -85,10 +85,14 @@ mod android {
             if let Some(app) = cell.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                 let state = app.state::<crate::mesh::MeshState>();
                 state.mark_connected(&address);
-                crate::mesh::send_presence(&state, &address);
+                let _ = crate::mesh::send_presence(&state, &address);
+                crate::mesh::flush_outbox(app, &state);
             }
         }
-        emit("ble_peer_connected", serde_json::json!({ "address": address }));
+        emit(
+            "ble_peer_connected",
+            serde_json::json!({ "address": address }),
+        );
     }
 
     #[no_mangle]
@@ -102,9 +106,25 @@ mod android {
             if let Some(app) = cell.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                 let state = app.state::<crate::mesh::MeshState>();
                 state.mark_disconnected(&address);
+                if let Some(peer_id) = state.peer_id_for_address(&address) {
+                    let app_state = app.state::<crate::AppState>();
+                    if let Ok(mut peers) = app_state.peers.lock() {
+                        if let Some(peer) = peers.iter_mut().find(|peer| peer.id == peer_id) {
+                            peer.online = false;
+                            peer.last_seen = Some(chrono::Utc::now().to_rfc3339());
+                        }
+                    }
+                    let _ = app.emit(
+                        "peer_status",
+                        serde_json::json!({ "id": peer_id, "online": false }),
+                    );
+                }
             }
         }
-        emit("ble_peer_disconnected", serde_json::json!({ "address": address }));
+        emit(
+            "ble_peer_disconnected",
+            serde_json::json!({ "address": address }),
+        );
     }
 
     #[no_mangle]
@@ -159,9 +179,13 @@ mod android {
         _env: JNIEnv,
         _this: JObject,
     ) {
-        emit("ble_permissions_granted", serde_json::json!({ "granted": true }));
+        emit(
+            "ble_permissions_granted",
+            serde_json::json!({ "granted": true }),
+        );
     }
-    static CONTEXT_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static CONTEXT_INITIALIZED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
 
     #[no_mangle]
     pub extern "system" fn Java_com_vortex_mesh_NativeBridge_setAndroidContext(
@@ -172,21 +196,23 @@ mod android {
         use std::sync::Mutex;
         match env.new_global_ref(&context) {
             Ok(global) => {
+                // ndk-context must never retain a local JNI reference. Keep the
+                // GlobalRef alive in ANDROID_CONTEXT for the whole process.
+                let context_ptr = global.as_obj().as_raw() as *mut std::ffi::c_void;
                 let cell = super::ANDROID_CONTEXT.get_or_init(|| Mutex::new(None));
                 *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(global);
+
+                if !CONTEXT_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    if let Ok(vm) = env.get_java_vm() {
+                        let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
+                        unsafe {
+                            ndk_context::initialize_android_context(vm_ptr, context_ptr);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("NativeBridge: setAndroidContext GlobalRef failed: {:?}", e);
-            }
-        }
-
-        if !CONTEXT_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            if let Ok(vm) = env.get_java_vm() {
-                let vm_ptr = vm.get_java_vm_pointer() as *mut std::ffi::c_void;
-                let context_ptr = context.into_raw() as *mut std::ffi::c_void;
-                unsafe {
-                    ndk_context::initialize_android_context(vm_ptr, context_ptr);
-                }
             }
         }
     }
@@ -246,9 +272,13 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let node_id_j = env.new_string(node_id).map_err(|e| e.to_string())?;
         let name_j = env.new_string(name).map_err(|e| e.to_string())?;
@@ -257,7 +287,11 @@ pub mod calls {
             class,
             "init",
             "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)V",
-            &[JValue::Object(ctx), JValue::Object(&node_id_j.into()), JValue::Object(&name_j.into())],
+            &[
+                JValue::Object(ctx),
+                JValue::Object(&node_id_j.into()),
+                JValue::Object(&name_j.into()),
+            ],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -267,9 +301,13 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
         let res = env
@@ -287,9 +325,13 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
         let res = env
@@ -307,9 +349,13 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
         env.call_static_method(
@@ -322,13 +368,43 @@ pub mod calls {
         Ok(())
     }
 
+    pub fn update_settings(hidden: bool, battery_save: bool) -> Result<(), String> {
+        let android_ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
+        env.call_static_method(
+            class,
+            "updateSettings",
+            "(Landroid/content/Context;ZZ)V",
+            &[
+                JValue::Object(ctx_ref.as_obj()),
+                JValue::Bool(hidden as u8),
+                JValue::Bool(battery_save as u8),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     pub fn send_message(address: &str, text: &str) -> Result<bool, String> {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let address_j = env.new_string(address).map_err(|e| e.to_string())?;
         let text_j = env.new_string(text).map_err(|e| e.to_string())?;
@@ -338,7 +414,11 @@ pub mod calls {
                 class,
                 "sendMessage",
                 "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
-                &[JValue::Object(ctx), JValue::Object(&address_j.into()), JValue::Object(&text_j.into())],
+                &[
+                    JValue::Object(ctx),
+                    JValue::Object(&address_j.into()),
+                    JValue::Object(&text_j.into()),
+                ],
             )
             .map_err(|e| e.to_string())?;
         res.z().map_err(|e| e.to_string())
@@ -348,9 +428,13 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
-        let ctx_cell = super::ANDROID_CONTEXT.get().ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
         let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
-        let ctx_ref = ctx_guard.as_ref().ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let ctx = ctx_ref.as_obj();
         let address_j = env.new_string(address).map_err(|e| e.to_string())?;
         let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
@@ -363,6 +447,27 @@ pub mod calls {
             )
             .map_err(|e| e.to_string())?;
         res.z().map_err(|e| e.to_string())
+    }
+
+    pub fn install_apk(path: &str) -> Result<(), String> {
+        let android_ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let path_j = env.new_string(path).map_err(|e| e.to_string())?;
+        let class = find_app_class(&mut env, "com/vortex/mesh/MainActivity")?;
+        let result = env
+            .call_static_method(
+                class,
+                "installApk",
+                "(Ljava/lang/String;)Z",
+                &[JValue::Object(&path_j.into())],
+            )
+            .map_err(|e| format!("Wywolanie instalatora APK przez JNI nie powiodlo sie: {e}"))?;
+        if result.z().map_err(|e| e.to_string())? {
+            Ok(())
+        } else {
+            Err("MainActivity nie jest dostepne dla instalatora APK".to_string())
+        }
     }
 }
 
@@ -380,10 +485,16 @@ pub mod calls {
     pub fn stop_scanning() -> Result<(), String> {
         Err("BLE dostepne tylko na Androidzie".into())
     }
+    pub fn update_settings(_hidden: bool, _battery_save: bool) -> Result<(), String> {
+        Ok(())
+    }
     pub fn send_message(_address: &str, _text: &str) -> Result<bool, String> {
         Err("BLE dostepne tylko na Androidzie".into())
     }
     pub fn connect_to_peer(_address: &str) -> Result<bool, String> {
         Err("BLE dostepne tylko na Androidzie".into())
+    }
+    pub fn install_apk(_path: &str) -> Result<(), String> {
+        Err("Instalacja APK jest dostepna tylko na Androidzie".into())
     }
 }

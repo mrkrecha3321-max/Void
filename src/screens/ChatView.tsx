@@ -95,7 +95,7 @@ const ChatView: React.FC<Props> = ({
             className="flex flex-col items-center justify-center h-full text-center opacity-50 space-y-3"
           >
              <Shield size={32} className="text-muted-foreground" />
-             <p className="text-xs text-muted-foreground">Wiadomości są zaszyfrowane E2EE (Antykwantowo)<br/>i przesyłane bezpiecznie.</p>
+             <p className="text-xs text-muted-foreground">Wiadomości są szyfrowane E2EE<br/>i podpisywane kluczem tożsamości.</p>
           </motion.div>
         )}
         
@@ -116,6 +116,9 @@ const ChatView: React.FC<Props> = ({
                   sent={isSent}
                   timestamp={formatTimestamp(msg.timestamp)}
                   delivered={msg.delivered}
+                  failed={msg.failed}
+                  queued={msg.queued}
+                  error={msg.error}
                 />
               </motion.div>
             );

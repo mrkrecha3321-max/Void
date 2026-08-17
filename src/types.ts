@@ -26,6 +26,9 @@ export interface Message {
   sent?: boolean;
   timestamp: Date | string;
   delivered?: boolean;
+  failed?: boolean;
+  queued?: boolean;
+  error?: string;
 }
 
 // IPC Event Payload Types
@@ -33,7 +36,7 @@ export interface MessageReceivedPayload {
   id: string;
   peerId: string;
   text: string;
-  timestamp: string;
+  timestamp: number;
 }
 
 export interface PeerDiscoveredPayload {
@@ -58,7 +61,31 @@ export interface PeerLocationPayload {
   peerId: string;
   lat: number;
   lon: number;
-  timestamp: string;
+  timestamp: number;
+}
+
+export interface MeshSendResult {
+  msgId: string;
+  queued: boolean;
+}
+
+export interface CoreMeshSettings {
+  relayNode: boolean;
+  batterySave: boolean;
+  hideNode: boolean;
+  rejectNewChats: boolean;
+  autoDestruct: boolean;
+  locationSharing: boolean;
+}
+
+export interface SosReceivedPayload {
+  id: string;
+  senderId: string;
+  name: string;
+  description: string;
+  lat?: number;
+  lon?: number;
+  timestamp: number;
 }
 
 // Legacy & UI Component Types & Aliases

@@ -5,6 +5,19 @@ interface Props {
   onSend: (text: string) => void;
 }
 
+const MAX_MESSAGE_BYTES = 2048;
+const encoder = new TextEncoder();
+
+const fitUtf8Limit = (value: string): string => {
+  if (encoder.encode(value).length <= MAX_MESSAGE_BYTES) return value;
+  let result = '';
+  for (const character of value) {
+    if (encoder.encode(result + character).length > MAX_MESSAGE_BYTES) break;
+    result += character;
+  }
+  return result;
+};
+
 const MessageInput: React.FC<Props> = ({ onSend }) => {
   const [text, setText] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -33,7 +46,7 @@ const MessageInput: React.FC<Props> = ({ onSend }) => {
         data-testid="chat-input"
         placeholder="Napisz wiadomość..."
         value={text}
-        onChange={e => setText(e.target.value)}
+        onChange={e => setText(fitUtf8Limit(e.target.value))}
         onKeyDown={handleKeyDown}
         autoComplete="off"
         autoCorrect="off"

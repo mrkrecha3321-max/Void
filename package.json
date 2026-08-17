@@ -1,21 +1,22 @@
 {
   "name": "void-app",
   "private": true,
-  "version": "0.1.11",
+  "version": "0.2.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 3000",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:e2e": "node --test tests/*.test.mjs"
+    "test:ci": "node --test tests/tier1_build.test.mjs",
+    "test:contract-model": "node --test tests/tier1_features.test.mjs tests/tier2_boundary.test.mjs tests/tier3_cross_feature.test.mjs tests/tier4_real_world.test.mjs",
+    "test:e2e": "npm run test:ci"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-geolocation": "^2.3.2",
     "@tauri-apps/plugin-notification": "^2.3.3",
-    "@tauri-apps/plugin-opener": "^2",
     "clsx": "^2.1.1",
     "lucide-react": "^1.28.0",
     "motion": "^12.43.0",

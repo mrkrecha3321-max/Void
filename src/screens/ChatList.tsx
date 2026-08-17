@@ -30,7 +30,7 @@ const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
       <div className="flex justify-center px-4 pb-2">
         <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-accent/10 border border-accent/20">
           <Shield size={12} className="text-accent" />
-          <span className="text-[10px] font-bold text-accent tracking-widest uppercase">E2EE Quantum Mesh</span>
+          <span className="text-[10px] font-bold text-accent tracking-widest uppercase">Podpisany E2EE Mesh</span>
         </div>
       </div>
 

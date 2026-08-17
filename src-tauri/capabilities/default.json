@@ -7,7 +7,9 @@
   ],
   "permissions": [
     "core:default",
-    "opener:default",
-    "notification:default"
+    "notification:default",
+    "geolocation:allow-check-permissions",
+    "geolocation:allow-request-permissions",
+    "geolocation:allow-get-current-position"
   ]
 }

@@ -127,7 +127,7 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
     );
 
     // Step 3: Cargo check in backend
-    const cargoRes = await runCommand('cargo', ['check'], TAURI_DIR);
+    const cargoRes = await runCommand('cargo', ['check', '--locked'], TAURI_DIR);
     assert.equal(
       cargoRes.exitCode,
       0,
