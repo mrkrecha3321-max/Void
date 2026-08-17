@@ -59,4 +59,5 @@ jobs:
           draft: false
           prerelease: false
         env:
+          NODE_OPTIONS: --use-system-ca
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
