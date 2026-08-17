@@ -1,3 +1,5 @@
+#![cfg_attr(not(target_os = "android"), allow(dead_code))]
+
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

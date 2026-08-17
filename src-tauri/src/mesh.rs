@@ -501,6 +501,7 @@ pub fn import_contact_card(state: &MeshState, card: &str) -> Result<ContactCardI
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_envelope(
     state: &MeshState,
     msg_type: &str,
