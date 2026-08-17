@@ -119,13 +119,23 @@ jobs:
           test -s Void.apk.sha256
 
       - name: Publish Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: |
-            Void.apk
-            Void.apk.sha256
-          name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              gh release upload "$GITHUB_REF_NAME" Void.apk Void.apk.sha256 --clobber && exit 0
+            else
+              gh release create "$GITHUB_REF_NAME" Void.apk Void.apk.sha256 \
+                --title "Release $GITHUB_REF_NAME" --verify-tag && exit 0
+            fi
+
+            if [ "$attempt" -lt 6 ]; then
+              delay=$((attempt * 15))
+              echo "GitHub release attempt $attempt failed; retrying in ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+
+          echo "Unable to publish GitHub release after 6 attempts." >&2
+          exit 1
