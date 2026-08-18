@@ -13,6 +13,7 @@ export interface Peer {
   name: string;
   online: boolean;
   lastSeen?: Date | string;
+  lastBleSeenAt?: number;
   rssi?: number;
   address?: string;
   lat?: number;

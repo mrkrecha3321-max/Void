@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   applyBleDiscoveryToPeer,
+  isRadarPeerVisible,
   mapPeerIdToAddress,
   queueOutboundMessages,
 } from './helpers/mesh_contracts.mjs';
@@ -55,6 +56,37 @@ describe('Tier 5: Offline delivery reliability contracts', () => {
     assert.equal(peer.online, false);
     assert.notEqual(peer.linkStatus, 'ready');
     assert.notEqual(peer.linkStatus, 'connected');
+  });
+
+  it('keeps a recently seen BLE peer on radar after a temporary GATT disconnect', () => {
+    const now = 10_000_000;
+    const peer = {
+      id: 'ABCDEF01',
+      online: false,
+      linkStatus: 'disconnected',
+      lastBleSeenAt: now - 2_000,
+    };
+    assert.equal(isRadarPeerVisible(peer, now), true);
+    assert.equal(isRadarPeerVisible(peer, now + 20_000), false);
+    assert.equal(isRadarPeerVisible({ ...peer, linkStatus: 'ready' }, now + 20_000), true);
+  });
+
+  it('radar controls real BLE scanning and startup can refresh a stale scan', () => {
+    const radar = fs.readFileSync(path.join(process.cwd(), 'src', 'screens', 'RadarScreen.tsx'), 'utf8');
+    const bleManager = fs.readFileSync(path.join(
+      process.cwd(), 'src-tauri', 'gen', 'android', 'app', 'src', 'main', 'java',
+      'com', 'vortex', 'mesh', 'BleManager.kt',
+    ), 'utf8');
+    const scanning = bleManager.slice(
+      bleManager.indexOf('fun startScanning'),
+      bleManager.indexOf('fun stopScanning'),
+    );
+
+    assert.match(radar, /bleStartScanning/);
+    assert.match(radar, /bleStopScanning/);
+    assert.match(radar, /isPeerVisibleOnRadar/);
+    assert.match(scanning, /stopScanningInternal\s*\(\)/);
+    assert.doesNotMatch(scanning, /scan already active[\s\S]*return true/);
   });
 
   it('maps a full Node ID to exactly one BLE address', () => {

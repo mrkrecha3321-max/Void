@@ -69,6 +69,7 @@ export function useMesh() {
 
     const bleDiscoveredPromise = onBlePeerDiscovered((payload: BlePeerDiscovered) => {
       if (!isMounted) return;
+      const seenAt = Date.now();
       setPeers(prev => {
         const existingIndex = prev.findIndex(
           p => p.id === payload.shortId || p.id.endsWith(payload.shortId) || (p.address && p.address === payload.address)
@@ -81,6 +82,7 @@ export function useMesh() {
             name: payload.name || updated[existingIndex].name,
             rssi: payload.rssi,
             address: payload.address,
+            lastBleSeenAt: seenAt,
             linkStatus: nextStatus,
             online: isPeerOnline(nextStatus, false),
           };
@@ -95,6 +97,7 @@ export function useMesh() {
               linkStatus: 'discovered',
               rssi: payload.rssi,
               address: payload.address,
+              lastBleSeenAt: seenAt,
             },
           ];
         }

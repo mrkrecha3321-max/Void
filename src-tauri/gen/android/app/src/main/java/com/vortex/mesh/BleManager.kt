@@ -325,6 +325,7 @@ object BleManager {
     }
 
     @JvmStatic
+    @Synchronized
     fun startAdvertising(ctx: Context): Boolean {
         advertisingRequested = true
         persistPrefs()
@@ -341,9 +342,11 @@ object BleManager {
             advertiser = currentAdapter.bluetoothLeAdvertiser ?: return false
             startGattServerIfNeeded(ctx)
             if (advertisingActive.get()) {
-                Log.i(TAG, "advertising already active")
-                return true
+                Log.i(TAG, "restarting active advertising")
             }
+            // Always re-register. Android may stop advertising without a useful
+            // callback, leaving the in-memory flag out of sync with the radio.
+            stopAdvertisingInternal(closeServer = false)
             val settings = AdvertiseSettings.Builder()
                 .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
@@ -370,6 +373,7 @@ object BleManager {
     }
 
     @JvmStatic
+    @Synchronized
     fun stopAdvertising(ctx: Context) {
         advertisingRequested = false
         persistPrefs()
@@ -525,6 +529,7 @@ object BleManager {
     }
 
     @JvmStatic
+    @Synchronized
     fun startScanning(ctx: Context): Boolean {
         scanningRequested = true
         persistPrefs()
@@ -535,9 +540,11 @@ object BleManager {
             if (!currentAdapter.isEnabled) return false
             scanner = currentAdapter.bluetoothLeScanner ?: return false
             if (scanningActive.get()) {
-                Log.i(TAG, "scan already active")
-                return true
+                Log.i(TAG, "restarting active scan")
             }
+            // Always re-register after the UI listeners are ready. This also
+            // recovers when Android stopped a previous scan silently.
+            stopScanningInternal()
             val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
             val settings = ScanSettings.Builder()
                 .setScanMode(
@@ -556,6 +563,7 @@ object BleManager {
     }
 
     @JvmStatic
+    @Synchronized
     fun stopScanning(ctx: Context) {
         scanningRequested = false
         persistPrefs()

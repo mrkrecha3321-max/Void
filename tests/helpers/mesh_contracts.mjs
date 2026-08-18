@@ -648,6 +648,13 @@ export function applyBleDiscoveryToPeer(peer, advertisement) {
   };
 }
 
+export function isRadarPeerVisible(peer, nowMs, ttlMs = 15_000) {
+  if (peer.linkStatus === 'connected' || peer.linkStatus === 'ready') return true;
+  return Number.isFinite(peer.lastBleSeenAt) &&
+    nowMs >= peer.lastBleSeenAt &&
+    nowMs - peer.lastBleSeenAt <= ttlMs;
+}
+
 export function mapPeerIdToAddress(bindings, peerId) {
   const exact = bindings.find((item) => item.peerId === peerId);
   if (exact) return exact.address;
