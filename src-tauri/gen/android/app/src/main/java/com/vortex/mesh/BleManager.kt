@@ -124,7 +124,6 @@ object BleManager {
             adapter = bluetoothManager?.adapter
             persistPrefs()
             startCleanupLoop()
-            ensureForegroundService(ctx)
             Log.i(TAG, "init nodeSuffix=${localNodeId.takeLast(8)}")
         } catch (error: Throwable) {
             bluetoothManager = null
@@ -329,7 +328,6 @@ object BleManager {
     fun startAdvertising(ctx: Context): Boolean {
         advertisingRequested = true
         persistPrefs()
-        ensureForegroundService(ctx)
         if (hiddenMode) {
             stopAdvertisingInternal(closeServer = false)
             return true
@@ -530,7 +528,6 @@ object BleManager {
     fun startScanning(ctx: Context): Boolean {
         scanningRequested = true
         persistPrefs()
-        ensureForegroundService(ctx)
         return try {
             appContext = ctx.applicationContext
             if (!canBle(ctx)) return false

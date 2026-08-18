@@ -1,5 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   applyBleDiscoveryToPeer,
   mapPeerIdToAddress,
@@ -7,6 +9,43 @@ import {
 } from './helpers/mesh_contracts.mjs';
 
 describe('Tier 5: Offline delivery reliability contracts', () => {
+  it('foreground service restoration cannot recursively restart itself', () => {
+    const androidDir = path.join(
+      process.cwd(),
+      'src-tauri',
+      'gen',
+      'android',
+      'app',
+      'src',
+      'main',
+      'java',
+      'com',
+      'vortex',
+      'mesh',
+    );
+    const bleManager = fs.readFileSync(path.join(androidDir, 'BleManager.kt'), 'utf8');
+    const service = fs.readFileSync(path.join(androidDir, 'MeshForegroundService.kt'), 'utf8');
+
+    const advertising = bleManager.slice(
+      bleManager.indexOf('fun startAdvertising'),
+      bleManager.indexOf('fun stopAdvertising'),
+    );
+    const scanning = bleManager.slice(
+      bleManager.indexOf('fun startScanning'),
+      bleManager.indexOf('fun stopScanning'),
+    );
+    const onStartCommand = service.slice(
+      service.indexOf('override fun onStartCommand'),
+      service.indexOf('override fun onDestroy'),
+    );
+
+    assert.ok(advertising.length > 0 && scanning.length > 0 && onStartCommand.length > 0);
+    assert.doesNotMatch(advertising, /ensureForegroundService\s*\(/);
+    assert.doesNotMatch(scanning, /ensureForegroundService\s*\(/);
+    assert.doesNotMatch(onStartCommand, /restoreIfNeeded\s*\(/);
+    assert.match(service, /override fun onCreate[\s\S]*restoreIfNeeded\s*\(/);
+  });
+
   it('discovered advertisement does not mark the peer online or ready', () => {
     const peer = applyBleDiscoveryToPeer(
       { id: 'ABCDEF01', name: 'Kontakt', online: false },

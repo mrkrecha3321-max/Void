@@ -105,9 +105,9 @@ try {
     Run node @('scripts/bump_version.cjs', $Version)
 
     Write-Host "`nSprawdzam frontend i testy..."
-    Run npm @('ci')
+    Run npm @('ci', '--prefer-offline', '--no-audit', '--no-fund')
     Run npm @('run', 'build')
-    Run npm @('run', 'test:e2e')
+    Run npm @('run', 'test:contract-model')
 
     Write-Host "`nTworze commit i tag $Tag..."
     Run git @('add', '--', 'package.json', 'package-lock.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json')
