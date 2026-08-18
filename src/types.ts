@@ -31,6 +31,7 @@ export interface Chat {
 
 export interface Message {
   id: string | number;
+  clientKey?: string;
   chatId?: string;
   text: string;
   sent?: boolean;

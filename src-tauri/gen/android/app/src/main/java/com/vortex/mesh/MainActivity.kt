@@ -2,26 +2,18 @@ package com.vortex.mesh
 
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
-import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     instance = this
     try {
-      // Keep an application Context in Rust. Activity-only work (APK install)
-      // is dispatched through the static installApk method below.
+      // Application Context is enough for BLE and PackageInstaller updates.
       NativeBridge.setAndroidContext(this.applicationContext)
       NativeBridge.setClassLoader(this.classLoader)
     } catch (error: Throwable) {
@@ -93,8 +85,25 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  override fun onStart() {
+    super.onStart()
+    instance = this
+  }
+
   override fun onResume() {
     super.onResume()
+    instance = this
+    try { BleManager.ensureForegroundService(this) } catch (_: Throwable) {}
+    try {
+      val pending = ApkInstaller.retryPending(this)
+      if (pending == ApkInstaller.NEED_PERMISSION) {
+        android.util.Log.i("MainActivity", "update waiting for install permission")
+      } else if (!pending.isNullOrBlank()) {
+        android.util.Log.w("MainActivity", "pending update retry: $pending")
+      }
+    } catch (error: Throwable) {
+      android.util.Log.w("MainActivity", "pending update retry failed", error)
+    }
     NfcManager.enableForegroundDispatch(this)
   }
 
@@ -116,58 +125,8 @@ class MainActivity : TauriActivity() {
     super.onDestroy()
   }
 
-  private fun installApkInternal(apkPath: String) {
-    val file = File(apkPath).canonicalFile
-    val cacheRoot = File(cacheDir, "updates").canonicalFile
-    if (!file.isFile || !file.path.startsWith(cacheRoot.path + File.separator)) {
-      throw SecurityException("APK path is outside the update cache")
-    }
-
-    if (Build.VERSION.SDK_INT >= 26 && !packageManager.canRequestPackageInstalls()) {
-      val settingsIntent = Intent(
-        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-        Uri.parse("package:$packageName")
-      ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      startActivity(settingsIntent)
-      throw IllegalStateException("Allow installs from this app, then retry the update")
-    }
-
-    val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-    val installIntent = Intent(Intent.ACTION_VIEW).apply {
-      setDataAndType(uri, "application/vnd.android.package-archive")
-      addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    startActivity(installIntent)
-  }
-
   companion object {
     private const val BLE_PERMISSION_REQUEST = 4201
     @Volatile private var instance: MainActivity? = null
-
-    @JvmStatic
-    fun installApk(apkPath: String): Boolean {
-      val activity = instance ?: return false
-      val result = AtomicBoolean(false)
-      val completed = CountDownLatch(1)
-      val install = {
-        try {
-          activity.installApkInternal(apkPath)
-          result.set(true)
-        } catch (error: Throwable) {
-          android.util.Log.e("MainActivity", "APK install failed", error)
-          try { NativeBridge.onBleError("APK install failed: ${error.message}") } catch (_: Throwable) {}
-        } finally {
-          completed.countDown()
-        }
-      }
-      if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
-        install()
-      } else {
-        activity.runOnUiThread { install() }
-        completed.await(5, TimeUnit.SECONDS)
-      }
-      return result.get()
-    }
   }
 }

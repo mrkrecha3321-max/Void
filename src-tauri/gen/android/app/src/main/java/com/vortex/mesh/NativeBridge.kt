@@ -14,6 +14,7 @@ object NativeBridge {
     @JvmStatic external fun onTransportSent(msgId: String)
     @JvmStatic external fun onTransportFailed(msgId: String, reason: String)
     @JvmStatic external fun onBleError(message: String)
+    @JvmStatic external fun onUpdateStatus(status: String, message: String)
     @JvmStatic external fun onNfcTagRead(payload: String)
     @JvmStatic external fun onNfcError(message: String)
     @JvmStatic external fun onPermissionsGranted()
