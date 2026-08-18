@@ -19,9 +19,9 @@ class ApplicationSmokeTest {
     @Test
     fun productionFrameCodecWorksOnAndroidRuntime() {
         val payload = "signed-envelope".toByteArray()
-        val frames = BleFrameCodec.encode(payload, 42)
+        val frames = BleFrameCodec.encode(payload, 42, 185)
         val decoded = frames.mapNotNull(BleFrameCodec::decode)
         assertEquals(1, decoded.size)
-        assertEquals("signed-envelope", decoded.first().payload.toString(Charsets.UTF_8))
+        assertEquals("signed-envelope", String(decoded.first().payload, Charsets.UTF_8))
     }
 }

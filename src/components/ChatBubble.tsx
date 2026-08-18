@@ -9,10 +9,12 @@ interface Props {
   delivered?: boolean;
   failed?: boolean;
   queued?: boolean;
+  transmitting?: boolean;
   error?: string;
+  onRetry?: () => void;
 }
 
-const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered, failed, queued, error }) => {
+const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered, failed, queued, transmitting, error, onRetry }) => {
   return (
     <motion.div 
       initial={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -35,9 +37,22 @@ const ChatBubble: React.FC<Props> = ({ text, sent, timestamp, delivered, failed,
         {sent && (
           <span className={failed ? 'text-red-500' : 'text-muted-foreground'} title={error}>
             {failed ? (
-              <span className="text-[11px] font-semibold">Nie wysłano</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="text-[11px] font-semibold">Nie wysłano</span>
+                {onRetry && (
+                  <button
+                    type="button"
+                    className="text-[11px] font-bold underline"
+                    onClick={onRetry}
+                  >
+                    Ponów
+                  </button>
+                )}
+              </span>
             ) : queued ? (
               <span className="text-[11px] font-semibold text-amber-500">W kolejce</span>
+            ) : transmitting ? (
+              <span className="text-[11px] font-semibold text-amber-500">Wysyłanie…</span>
             ) : delivered ? (
               <CheckCheck size={14} className="text-blue-500" />
             ) : (

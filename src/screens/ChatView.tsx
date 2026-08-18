@@ -2,7 +2,8 @@ import React, { useEffect, useRef } from 'react';
 import Avatar from '../components/Avatar';
 import ChatBubble from '../components/ChatBubble';
 import MessageInput from '../components/MessageInput';
-import type { ChatNode, Message } from '../types';
+import type { ChatNode, Message, PeerLinkStatus } from '../types';
+import { isPeerOnline, peerLinkLabel } from '../peerLink';
 import { Phone, Video, ChevronLeft, Shield, MoreVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -14,7 +15,10 @@ interface Props {
   onBack: () => void;
   onSend?: (chatId: string, text: string) => void;
   onSendMessage?: (chatId: string, text: string) => void;
+  onRetry?: (chatId: string, message: Message) => void;
   onOpenSettings?: () => void;
+  peerOnline?: boolean;
+  peerLinkStatus?: PeerLinkStatus;
 }
 
 function formatTimestamp(date: Date | string): string {
@@ -31,7 +35,10 @@ const ChatView: React.FC<Props> = ({
   onBack,
   onSend,
   onSendMessage,
+  onRetry,
   onOpenSettings,
+  peerOnline,
+  peerLinkStatus,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   
@@ -59,12 +66,14 @@ const ChatView: React.FC<Props> = ({
         >
           <ChevronLeft size={28} strokeWidth={2.5} />
         </button>
-        <Avatar name={title} size={40} online={true} />
+        <Avatar name={title} size={40} online={isPeerOnline(peerLinkStatus, peerOnline)} />
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 ml-1">
           <span className="text-base font-bold text-foreground truncate">{title}</span>
           <div className="flex items-center gap-1 mt-0.5">
-            <Shield size={10} className="text-emerald-500" />
-            <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">E2EE Mesh</span>
+            <Shield size={10} className={isPeerOnline(peerLinkStatus, peerOnline) ? 'text-emerald-500' : 'text-muted-foreground'} />
+            <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">
+              {peerLinkLabel(peerLinkStatus, peerOnline)} · E2EE
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-1 mr-2">
@@ -118,7 +127,9 @@ const ChatView: React.FC<Props> = ({
                   delivered={msg.delivered}
                   failed={msg.failed}
                   queued={msg.queued}
+                  transmitting={msg.transmitting || msg.status === 'transmitting'}
                   error={msg.error}
+                  onRetry={onRetry && isSent && msg.failed ? () => onRetry(id, msg) : undefined}
                 />
               </motion.div>
             );
