@@ -13,6 +13,7 @@ import {
   saveChatState,
 } from '../api';
 import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload, InboxMessagePayload } from '../types';
+import { peerIdsMatch, preferFullPeerId } from '../peerLink';
 
 const localId = (prefix: string): string => {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -45,6 +46,12 @@ export function useChats() {
     chatsRef.current = chats;
   }, [chats]);
 
+  const findChat = useCallback((peerId: string): Chat | undefined => {
+    return chatsRef.current.find(chat =>
+      peerIdsMatch(chat.peerId, peerId) || peerIdsMatch(chat.id, peerId)
+    );
+  }, []);
+
   const ingestIncoming = useCallback((payload: InboxMessagePayload | MessageReceivedPayload) => {
     // Until encrypted history is loaded, the durable Rust inbox remains the
     // source of truth. Ingesting a live event earlier could be overwritten by
@@ -56,10 +63,8 @@ export function useChats() {
 
     const msgDate = new Date(payload.timestamp);
     const timestamp = isNaN(msgDate.getTime()) ? new Date() : msgDate;
-    let existing = chatsRef.current.find(c => c.peerId === payload.peerId || c.id === payload.peerId);
-    if (existing) {
-      // Keep the existing chat identity.
-    } else {
+    let existing = findChat(payload.peerId);
+    if (!existing) {
       existing = {
         id: localId('chat'),
         peerId: payload.peerId,
@@ -74,6 +79,7 @@ export function useChats() {
 
     const incomingMsg: Message = {
       id: incomingId,
+      clientKey: incomingId,
       chatId,
       text: payload.text,
       sent: false,
@@ -81,6 +87,11 @@ export function useChats() {
     };
 
     setMessages(prev => {
+      if (Object.values(prev).some(chatMessages =>
+        chatMessages.some(message => message.id === incomingMsg.id || message.clientKey === incomingMsg.clientKey)
+      )) {
+        return prev;
+      }
       return {
         ...prev,
         [chatId]: [...(prev[chatId] || []), incomingMsg],
@@ -88,12 +99,15 @@ export function useChats() {
     });
 
     setChats(prev => {
-      const index = prev.findIndex(c => c.id === chatId || c.peerId === payload.peerId);
+      const index = prev.findIndex(c =>
+        c.id === chatId || peerIdsMatch(c.peerId, payload.peerId) || peerIdsMatch(c.id, payload.peerId)
+      );
       if (index >= 0) {
         const updated = prev.map((c, i) =>
           i === index
             ? {
                 ...c,
+                peerId: preferFullPeerId(c.peerId, payload.peerId),
                 lastMessage: payload.text,
                 lastMessageTime: timestamp,
                 unreadCount: c.unreadCount + 1,
@@ -115,7 +129,7 @@ export function useChats() {
       chatsRef.current = updated;
       return updated;
     });
-  }, []);
+  }, [findChat]);
 
   const drainInboxIntoState = useCallback(async (active = true) => {
     if (!(window as any)['__TAURI_INTERNALS__']) return;
@@ -267,16 +281,20 @@ export function useChats() {
       const peerName = payload.name || peerId;
 
       setChats(prev => {
-        const existingIndex = prev.findIndex(c => c.peerId === peerId || c.id === peerId);
+        const existingIndex = prev.findIndex(c =>
+          peerIdsMatch(c.peerId, peerId) || peerIdsMatch(c.id, peerId)
+        );
         if (existingIndex < 0) return prev;
         const existing = prev[existingIndex];
-        if (existing.peerName === existing.peerId && peerName !== existing.peerId) {
-          const updated = [...prev];
-          updated[existingIndex] = { ...existing, peerName };
-          chatsRef.current = updated;
-          return updated;
-        }
-        return prev;
+        const nextPeerId = preferFullPeerId(existing.peerId, peerId);
+        const nextName = existing.peerName === existing.peerId && peerName !== existing.peerId
+          ? peerName
+          : existing.peerName;
+        if (nextPeerId === existing.peerId && nextName === existing.peerName) return prev;
+        const updated = [...prev];
+        updated[existingIndex] = { ...existing, peerId: nextPeerId, peerName: nextName };
+        chatsRef.current = updated;
+        return updated;
       });
     });
 
@@ -286,8 +304,21 @@ export function useChats() {
   }, []);
 
   const startChat = useCallback((peerId: string, peerName: string): string => {
-    const existing = chatsRef.current.find(c => c.peerId === peerId || c.id === peerId);
-    if (existing) return existing.id;
+    const existing = chatsRef.current.find(c =>
+      peerIdsMatch(c.peerId, peerId) || peerIdsMatch(c.id, peerId)
+    );
+    if (existing) {
+      if (preferFullPeerId(existing.peerId, peerId) !== existing.peerId) {
+        const upgraded = chatsRef.current.map(chat =>
+          chat.id === existing.id
+            ? { ...chat, peerId: preferFullPeerId(chat.peerId, peerId), peerName: peerName || chat.peerName }
+            : chat
+        );
+        chatsRef.current = upgraded;
+        setChats(upgraded);
+      }
+      return existing.id;
+    }
 
     const chatId = localId('chat');
     const newChat: Chat = {
@@ -298,7 +329,7 @@ export function useChats() {
     };
     chatsRef.current = [newChat, ...chatsRef.current];
     setChats(prev => {
-      if (prev.some(c => c.id === chatId || c.peerId === peerId)) return prev;
+      if (prev.some(c => c.id === chatId || peerIdsMatch(c.peerId, peerId))) return prev;
       return [newChat, ...prev];
     });
     return chatId;
@@ -329,6 +360,7 @@ export function useChats() {
     const tempId = localId('pending-message');
     const msg: Message = {
       id: tempId,
+      clientKey: tempId,
       chatId,
       text,
       sent: true,
@@ -402,6 +434,31 @@ export function useChats() {
     }));
   }, []);
 
+  const messagesForChat = useCallback((chatId: string): Message[] => {
+    const chat = chats.find(candidate => candidate.id === chatId);
+    const relatedIds = chats
+      .filter(candidate =>
+        candidate.id === chatId || (chat ? peerIdsMatch(candidate.peerId, chat.peerId) : false)
+      )
+      .map(candidate => candidate.id);
+    const ids = relatedIds.length > 0 ? relatedIds : [chatId];
+    const seen = new Set<string>();
+    const merged: Message[] = [];
+    for (const id of ids) {
+      for (const message of messages[id] || []) {
+        const key = String(message.id);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+      }
+    }
+    return merged.sort((left, right) => {
+      const a = new Date(left.timestamp).getTime();
+      const b = new Date(right.timestamp).getTime();
+      return (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
+    });
+  }, [chats, messages]);
+
   const markRead = useCallback((chatId: string) => {
     setChats(prev => {
       const updated = prev.map(chat =>
@@ -429,7 +486,7 @@ export function useChats() {
         
         for (const [cId, msgs] of Object.entries(next)) {
           const chat = chatsRef.current.find(candidate => candidate.id === cId);
-          if (!chat || chat.peerId !== payload.peerId) continue;
+          if (!chat || !peerIdsMatch(chat.peerId, payload.peerId)) continue;
           const updatedMsgs = msgs.map(m => {
             if (m.id === payload.msgId) {
               modified = true;
@@ -533,7 +590,8 @@ export function useChats() {
     setChats([]);
     setMessages({});
     chatsRef.current = [];
+    acceptedIncomingIdsRef.current.clear();
   }, []);
 
-  return { chats, messages, sendMessage, receiveMessage, startChat, markRead, retryMessage, clearAllData };
+  return { chats, messages, messagesForChat, sendMessage, receiveMessage, startChat, markRead, retryMessage, clearAllData };
 }

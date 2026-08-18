@@ -212,6 +212,21 @@ mod android {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onUpdateStatus(
+        mut env: JNIEnv,
+        _this: JObject,
+        status: JString,
+        message: JString,
+    ) {
+        let status = jstr(&mut env, &status);
+        let message = jstr(&mut env, &message);
+        emit(
+            "update_status",
+            serde_json::json!({ "status": status, "message": message }),
+        );
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onNfcTagRead(
         mut env: JNIEnv,
         _this: JObject,
@@ -296,7 +311,7 @@ mod android {
 // ---- Rust -> Kotlin: wywolania na BleManager (JVM static, dzieki @JvmStatic) ----
 #[cfg(target_os = "android")]
 pub mod calls {
-    use jni::objects::{JClass, JValue};
+    use jni::objects::{JClass, JString, JValue};
     use jni::JNIEnv;
     use jni::JavaVM;
 
@@ -544,20 +559,40 @@ pub mod calls {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
         let path_j = env.new_string(path).map_err(|e| e.to_string())?;
-        let class = find_app_class(&mut env, "com/vortex/mesh/MainActivity")?;
+        let class = find_app_class(&mut env, "com/vortex/mesh/ApkInstaller")?;
         let result = env
             .call_static_method(
                 class,
-                "installApk",
-                "(Ljava/lang/String;)Z",
-                &[JValue::Object(&path_j.into())],
+                "install",
+                "(Landroid/content/Context;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    JValue::Object(ctx_ref.as_obj()),
+                    JValue::Object(&path_j.into()),
+                ],
             )
             .map_err(|e| format!("Wywolanie instalatora APK przez JNI nie powiodlo sie: {e}"))?;
-        if result.z().map_err(|e| e.to_string())? {
+        let message_obj = result.l().map_err(|e| e.to_string())?;
+        let message: String = env
+            .get_string(&JString::from(message_obj))
+            .map(String::from)
+            .map_err(|e| e.to_string())?;
+        if message.is_empty() {
+            Ok(())
+        } else if message == "NEED_INSTALL_PERMISSION" {
+            // Settings were opened and MainActivity retries the staged APK on
+            // resume. Treat this as a started update, not as an installation
+            // failure in the frontend.
             Ok(())
         } else {
-            Err("MainActivity nie jest dostepne dla instalatora APK".to_string())
+            Err(message)
         }
     }
 }

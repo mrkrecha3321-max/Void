@@ -14,6 +14,41 @@ pub fn is_valid_release_tag(tag: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+' | b'_'))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseAssets {
+    pub apk_url: String,
+    pub checksum_url: String,
+}
+
+pub fn release_assets_from_json(json: &serde_json::Value) -> Result<ReleaseAssets, String> {
+    let assets = json
+        .get("assets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "Release nie zawiera listy plikow".to_string())?;
+    let apk_url = asset_download_url(assets, "Void.apk")
+        .ok_or_else(|| "Release nie zawiera Void.apk".to_string())?;
+    let checksum_url = asset_download_url(assets, "Void.apk.sha256")
+        .ok_or_else(|| "Release nie zawiera Void.apk.sha256".to_string())?;
+    Ok(ReleaseAssets {
+        apk_url,
+        checksum_url,
+    })
+}
+
+fn asset_download_url(assets: &[serde_json::Value], name: &str) -> Option<String> {
+    assets.iter().find_map(|asset| {
+        let asset_name = asset.get("name").and_then(|value| value.as_str())?;
+        if asset_name != name {
+            return None;
+        }
+        asset
+            .get("browser_download_url")
+            .and_then(|value| value.as_str())
+            .filter(|url| url.starts_with("https://"))
+            .map(str::to_string)
+    })
+}
+
 #[cfg(target_os = "android")]
 pub async fn download_and_install(app: &AppHandle, version: &str) -> Result<(), String> {
     use futures_util::StreamExt;
@@ -25,17 +60,31 @@ pub async fn download_and_install(app: &AppHandle, version: &str) -> Result<(), 
         return Err("Nieprawidlowy tag release".to_string());
     }
 
-    let base_url = format!("https://github.com/{REPOSITORY}/releases/download/{version}");
     let client = reqwest::Client::builder()
         .user_agent("void-android-updater")
         .connect_timeout(std::time::Duration::from_secs(15))
         .timeout(std::time::Duration::from_secs(180))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::limited(10))
         .build()
         .map_err(|e| e.to_string())?;
 
+    let release_url = format!("https://api.github.com/repos/{REPOSITORY}/releases/tags/{version}");
+    let release_json: serde_json::Value = client
+        .get(&release_url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Nie mozna odczytac wydania GitHub: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub nie zwrocil wydania {version}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Nieprawidlowa odpowiedz GitHub: {e}"))?;
+    let assets = release_assets_from_json(&release_json)?;
+
     let checksum_response = client
-        .get(format!("{base_url}/Void.apk.sha256"))
+        .get(&assets.checksum_url)
+        .header("Accept", "application/octet-stream")
         .send()
         .await
         .map_err(|e| format!("Nie mozna pobrac sumy kontrolnej: {e}"))?
@@ -59,7 +108,8 @@ pub async fn download_and_install(app: &AppHandle, version: &str) -> Result<(), 
         .to_ascii_lowercase();
 
     let response = client
-        .get(format!("{base_url}/Void.apk"))
+        .get(&assets.apk_url)
+        .header("Accept", "application/octet-stream")
         .send()
         .await
         .map_err(|e| format!("Nie mozna pobrac APK: {e}"))?
@@ -153,5 +203,26 @@ mod tests {
         assert!(!is_valid_release_tag("../../main"));
         assert!(!is_valid_release_tag("https://example.com/a.apk"));
         assert!(!is_valid_release_tag("latest"));
+    }
+
+    #[test]
+    fn parses_github_release_asset_urls() {
+        let json = serde_json::json!({
+            "tag_name": "v0.2.1",
+            "assets": [
+                {
+                    "name": "Void.apk.sha256",
+                    "browser_download_url": "https://github.com/mrkrecha3321-max/Void/releases/download/v0.2.1/Void.apk.sha256"
+                },
+                {
+                    "name": "Void.apk",
+                    "browser_download_url": "https://github.com/mrkrecha3321-max/Void/releases/download/v0.2.1/Void.apk"
+                }
+            ]
+        });
+        let assets = release_assets_from_json(&json).unwrap();
+        assert!(assets.apk_url.ends_with("/Void.apk"));
+        assert!(assets.checksum_url.ends_with("/Void.apk.sha256"));
+        assert!(release_assets_from_json(&serde_json::json!({ "assets": [] })).is_err());
     }
 }
