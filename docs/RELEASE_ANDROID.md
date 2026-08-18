@@ -68,6 +68,8 @@ Dla istniejących instalacji testowych konieczne będzie jednorazowe:
 
 Od tej chwili wszystkie wydania muszą używać dokładnie tego samego keystore.
 
+Wbudowany updater pobiera `Void.apk` i `Void.apk.sha256` z GitHub Releases, sprawdza SHA-256 i uruchamia systemowy `PackageInstaller`. Na Androidzie 8+ użytkownik musi raz zezwolić na instalację z tej aplikacji (`Ustawienia → Instaluj nieznane aplikacje`). Po powrocie do VOID instalacja wznawia się sama. Nie wymaga już żywej instancji `MainActivity`.
+
 ## 4. Wydanie
 
 ### Automatycznie na Windows
