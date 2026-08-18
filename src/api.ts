@@ -10,6 +10,8 @@ import type {
   SosReceivedPayload,
   MeshSendResult,
   CoreMeshSettings,
+  InboxMessagePayload,
+  PeerLinkPayload,
 } from './types';
 
 export type { UnlistenFn };
@@ -52,6 +54,9 @@ export const checkForUpdates = async (): Promise<string | null> => {
 };
 export const installUpdate = (version: string): Promise<void> =>
   invoke('install_update', { version });
+export const onUpdateStatus = (
+  callback: (payload: { status: string; message: string }) => void,
+) => subscribe('update_status', callback);
 export const getPeers = (): Promise<Peer[]> => invoke<Peer[]>('get_peers');
 export const getNodeId = (): Promise<string> => invoke<string>('get_node_id');
 
@@ -84,6 +89,17 @@ export const onMessageTransportSent = (callback: (payload: { msgId: string }) =>
 export const onMessageTransportFailed = (
   callback: (payload: { msgId: string; reason: string }) => void,
 ) => subscribe('message_transport_failed', callback);
+export const onPeerLink = (callback: (payload: PeerLinkPayload) => void) =>
+  subscribe('peer_link', callback);
+export const onBlePeerConnecting = (callback: (payload: { address: string }) => void) =>
+  subscribe('ble_peer_connecting', callback);
+
+export const listPendingInbox = (): Promise<InboxMessagePayload[]> =>
+  invoke('list_pending_inbox');
+export const confirmInbox = (ids: string[]): Promise<string[]> =>
+  invoke('confirm_inbox', { ids });
+export const meshRetryMessage = (msgId: string): Promise<string> =>
+  invoke('mesh_retry_message', { msgId });
 
 export const bleInit = (name: string): Promise<void> => invoke('ble_init', { name });
 export const bleStartAdvertising = (): Promise<boolean> => invoke('ble_start_advertising');

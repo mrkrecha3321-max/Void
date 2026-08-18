@@ -1,10 +1,14 @@
 use crate::crypto;
 use crate::native_bridge;
-use crate::storage::{CoreSettings, OutboxRecord, PeerPinRecord, SecureStore};
+use crate::reliability::{
+    should_attempt_outbox, MAX_TRANSPORT_ATTEMPTS_PER_MINUTE, TRANSPORT_RATE_WINDOW_MS,
+};
+use crate::storage::{CoreSettings, InboxRecord, OutboxRecord, PeerPinRecord, SecureStore};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
@@ -25,14 +29,16 @@ const MAX_MESSAGES_PER_WINDOW: usize = 40;
 const SOS_COOLDOWN: Duration = Duration::from_secs(60);
 
 trait MeshTransport: Send + Sync {
-    fn send(&self, address: &str, payload: &str) -> Result<bool, String>;
+    /// Hands a signed envelope to the BLE queue. `true` means the queue accepted
+    /// the transfer for `msg_id`. It is NOT proof that any fragment left the radio.
+    fn send(&self, address: &str, payload: &str, msg_id: &str) -> Result<bool, String>;
 }
 
 struct NativeBleTransport;
 
 impl MeshTransport for NativeBleTransport {
-    fn send(&self, address: &str, payload: &str) -> Result<bool, String> {
-        native_bridge::calls::send_message(address, payload)
+    fn send(&self, address: &str, payload: &str, msg_id: &str) -> Result<bool, String> {
+        native_bridge::calls::send_message(address, payload, msg_id)
     }
 }
 
@@ -50,6 +56,16 @@ pub struct DiscoveredPeer {
 pub struct SendResult {
     pub msg_id: String,
     pub queued: bool,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxMessage {
+    pub id: String,
+    pub peer_id: String,
+    pub text: String,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +159,8 @@ pub struct MeshState {
     rate_limits: Mutex<HashMap<String, VecDeque<u64>>>,
     last_sos_sent: Mutex<Option<Instant>>,
     last_sos_received: Mutex<HashMap<String, Instant>>,
+    transport_attempts: Mutex<VecDeque<u64>>,
+    retry_scheduled: AtomicBool,
 }
 
 impl MeshState {
@@ -200,7 +218,16 @@ impl MeshState {
             rate_limits: Mutex::new(HashMap::new()),
             last_sos_sent: Mutex::new(None),
             last_sos_received: Mutex::new(HashMap::new()),
+            transport_attempts: Mutex::new(VecDeque::new()),
+            retry_scheduled: AtomicBool::new(false),
         }
+    }
+
+    fn has_seen(&self, id: &str) -> bool {
+        self.seen_set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
     }
 
     fn mark_seen(&self, id: &str, created_at_ms: u64) -> bool {
@@ -567,9 +594,16 @@ fn relay(
         .collect();
 
     let mut queued = 0;
+    let msg_id = &envelope.body.msg_id;
     for address in addresses {
-        if matches!(state.transport.send(&address, &json), Ok(true)) {
-            queued += 1;
+        match state.transport.send(&address, &json, msg_id) {
+            Ok(true) => queued += 1,
+            Ok(false) => {
+                eprintln!("void-mesh: transport queue rejected msg_id={msg_id}");
+            }
+            Err(error) => {
+                eprintln!("void-mesh: transport error msg_id={msg_id}: {error}");
+            }
         }
     }
     Ok(queued)
@@ -596,7 +630,10 @@ pub fn send_presence(state: &MeshState, to_address: &str) -> Result<(), String> 
         None,
     )?;
     let json = serialize_envelope(&envelope)?;
-    match state.transport.send(to_address, &json) {
+    match state
+        .transport
+        .send(to_address, &json, &envelope.body.msg_id)
+    {
         Ok(true) => Ok(()),
         Ok(false) => Err("Nie udalo sie zakolejkowac presence w BLE".to_string()),
         Err(error) => Err(error),
@@ -637,16 +674,25 @@ pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<Se
     )?;
     state.mark_seen(&envelope.body.msg_id, envelope.body.created_at_ms);
     // Keep the signed ciphertext in the encrypted outbox until a signed ACK is
-    // received. This permits retry after a late GATT failure or reconnect.
+    // received. Queue acceptance is not delivery and is not even a radio send.
     state.store.enqueue_outbox(OutboxRecord {
         msg_id: envelope.body.msg_id.clone(),
         envelope_json: serialize_envelope(&envelope)?,
         created_at_ms: envelope.body.created_at_ms,
+        last_attempt_at_ms: 0,
+        attempt_count: 0,
+        in_flight: false,
+        last_error: None,
     })?;
-    let sent_to_transport = relay(state, &envelope, None)? > 0;
+    let accepted = dispatch_outbox_item(state, &envelope.body.msg_id, false)? > 0;
     Ok(SendResult {
         msg_id: envelope.body.msg_id,
-        queued: !sent_to_transport,
+        queued: !accepted,
+        status: if accepted {
+            "transmitting".to_string()
+        } else {
+            "queued".to_string()
+        },
     })
 }
 
@@ -760,6 +806,22 @@ fn send_ack(state: &MeshState, recipient_id: &str, ack_for_msg_id: &str) {
 }
 
 pub fn flush_outbox(app: &AppHandle, state: &MeshState) {
+    flush_outbox_inner(state, false);
+    emit_expired_outbox(app, state);
+}
+
+pub fn retry_outbox_item(state: &MeshState, msg_id: &str) -> Result<String, String> {
+    if state.store.outbox_item(msg_id).is_none() {
+        return Err("Wiadomosc nie jest w outbox".to_string());
+    }
+    if dispatch_outbox_item(state, msg_id, true)? > 0 {
+        Ok("transmitting".to_string())
+    } else {
+        Ok("queued".to_string())
+    }
+}
+
+fn emit_expired_outbox(app: &AppHandle, state: &MeshState) {
     let now = now_ms();
     if let Ok(expired) = state.store.prune_outbox(now) {
         for msg_id in expired {
@@ -769,21 +831,180 @@ pub fn flush_outbox(app: &AppHandle, state: &MeshState) {
             );
         }
     }
+}
+
+fn flush_outbox_inner(state: &MeshState, ignore_backoff: bool) {
+    let now = now_ms();
+    let _ = state.store.prune_outbox(now);
     for item in state.store.outbox(now) {
-        let envelope = match serde_json::from_str::<MeshEnvelope>(&item.envelope_json) {
-            Ok(envelope) if envelope.body.msg_id == item.msg_id => envelope,
-            _ => {
-                let _ = state.store.remove_outbox(&item.msg_id);
-                continue;
-            }
-        };
-        if relay(state, &envelope, None).unwrap_or(0) > 0 {
-            let _ = app.emit(
-                "message_transport_sent",
-                serde_json::json!({ "msgId": item.msg_id }),
+        if !should_attempt_outbox(
+            item.in_flight,
+            item.attempt_count,
+            item.last_attempt_at_ms,
+            now,
+            ignore_backoff,
+        ) {
+            continue;
+        }
+        let _ = dispatch_outbox_item(state, &item.msg_id, ignore_backoff);
+    }
+}
+
+fn allow_transport_attempt(state: &MeshState, now_ms: u64) -> bool {
+    let mut attempts = state
+        .transport_attempts
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    while attempts
+        .front()
+        .is_some_and(|timestamp| now_ms.saturating_sub(*timestamp) > TRANSPORT_RATE_WINDOW_MS)
+    {
+        attempts.pop_front();
+    }
+    if attempts.len() >= MAX_TRANSPORT_ATTEMPTS_PER_MINUTE {
+        return false;
+    }
+    attempts.push_back(now_ms);
+    true
+}
+
+fn dispatch_outbox_item(
+    state: &MeshState,
+    msg_id: &str,
+    ignore_backoff: bool,
+) -> Result<usize, String> {
+    let Some(item) = state.store.outbox_item(msg_id) else {
+        return Ok(0);
+    };
+    let now = now_ms();
+    if !should_attempt_outbox(
+        item.in_flight,
+        item.attempt_count,
+        item.last_attempt_at_ms,
+        now,
+        ignore_backoff,
+    ) {
+        return Ok(0);
+    }
+    if !allow_transport_attempt(state, now) {
+        eprintln!("void-mesh: transport rate-limited msg_id={msg_id}");
+        return Ok(0);
+    }
+    let envelope = match serde_json::from_str::<MeshEnvelope>(&item.envelope_json) {
+        Ok(envelope) if envelope.body.msg_id == item.msg_id => envelope,
+        _ => {
+            let _ = state.store.remove_outbox(&item.msg_id);
+            return Err("Uszkodzony rekord outbox".to_string());
+        }
+    };
+    state
+        .store
+        .mark_outbox_attempt(msg_id, now, true)
+        .map_err(|error| {
+            eprintln!("void-mesh: cannot mark outbox in-flight msg_id={msg_id}: {error}");
+            error
+        })?;
+    match relay(state, &envelope, None) {
+        Ok(0) => {
+            let _ = state.store.mark_outbox_in_flight(
+                msg_id,
+                false,
+                Some("Brak gotowego lacza BLE".to_string()),
             );
+            Ok(0)
+        }
+        Ok(accepted) => Ok(accepted),
+        Err(error) => {
+            let _ = state
+                .store
+                .mark_outbox_in_flight(msg_id, false, Some(error.clone()));
+            Err(error)
         }
     }
+}
+
+pub fn on_transport_sent(app: &AppHandle, state: &MeshState, msg_id: &str) {
+    if msg_id.is_empty() || msg_id.len() > 64 {
+        return;
+    }
+    eprintln!("void-mesh: transport_sent msg_id={msg_id}");
+    let _ = state.store.mark_outbox_in_flight(msg_id, false, None);
+    let _ = app.emit(
+        "message_transport_sent",
+        serde_json::json!({ "msgId": msg_id }),
+    );
+}
+
+pub fn on_transport_failed(app: &AppHandle, state: &MeshState, msg_id: &str, reason: &str) {
+    if msg_id.is_empty() || msg_id.len() > 64 {
+        return;
+    }
+    let reason = truncate_utf8(reason, 200);
+    eprintln!("void-mesh: transport_failed msg_id={msg_id} reason={reason}");
+    let updated = state
+        .store
+        .mark_outbox_in_flight(msg_id, false, Some(reason.clone()))
+        .ok()
+        .flatten();
+    let attempts = updated.as_ref().map(|item| item.attempt_count).unwrap_or(0);
+    if updated
+        .as_ref()
+        .is_some_and(|item| item.attempt_count >= crate::reliability::MAX_OUTBOX_ATTEMPTS)
+    {
+        let _ = app.emit(
+            "message_transport_failed",
+            serde_json::json!({ "msgId": msg_id, "reason": reason }),
+        );
+        return;
+    }
+    if !state.get_connected_addresses().is_empty() {
+        schedule_outbox_retry(app, crate::reliability::outbox_backoff_ms(attempts));
+    }
+}
+
+fn schedule_outbox_retry(app: &AppHandle, delay_ms: u64) {
+    if state_retry_swap(app) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms.max(50))).await;
+            let mesh = app.state::<MeshState>();
+            mesh.retry_scheduled.store(false, Ordering::SeqCst);
+            flush_outbox(&app, &mesh);
+        });
+    }
+}
+
+fn state_retry_swap(app: &AppHandle) -> bool {
+    app.state::<MeshState>()
+        .retry_scheduled
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+pub fn list_pending_inbox(state: &MeshState) -> Vec<InboxMessage> {
+    state
+        .store
+        .inbox()
+        .into_iter()
+        .map(|item| InboxMessage {
+            id: item.msg_id,
+            peer_id: item.peer_id,
+            text: item.text,
+            timestamp: item.timestamp_ms,
+        })
+        .collect()
+}
+
+pub fn confirm_inbox(state: &MeshState, ids: Vec<String>) -> Result<Vec<String>, String> {
+    if ids.len() > 1_000 {
+        return Err("Zbyt wiele identyfikatorow inbox".to_string());
+    }
+    for id in &ids {
+        if id.len() > 64 {
+            return Err("Nieprawidlowy identyfikator inbox".to_string());
+        }
+    }
+    state.store.confirm_inbox(&ids)
 }
 
 fn validate_coordinates(lat: f64, lon: f64) -> Result<(), String> {
@@ -919,6 +1140,40 @@ fn validate_envelope(raw_json: &str) -> Result<ValidatedEnvelope, String> {
 }
 
 pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, raw_json: &str) {
+    handle_incoming_inner(state, from_address, raw_json, &mut |name, payload| {
+        if name == "peer_discovered" {
+            if let (Some(id), Some(peer_name), Some(online)) = (
+                payload.get("id").and_then(|value| value.as_str()),
+                payload.get("name").and_then(|value| value.as_str()),
+                payload.get("online").and_then(|value| value.as_bool()),
+            ) {
+                let app_state = app.state::<crate::AppState>();
+                if let Ok(mut peers) = app_state.peers.lock() {
+                    if let Some(peer) = peers.iter_mut().find(|peer| peer.id == id) {
+                        peer.name = peer_name.to_string();
+                        peer.online = online;
+                        peer.last_seen = Some(chrono::Utc::now().to_rfc3339());
+                    } else if peers.len() < MAX_STATE_PEERS {
+                        peers.push(crate::Peer {
+                            id: id.to_string(),
+                            name: peer_name.to_string(),
+                            online,
+                            last_seen: Some(chrono::Utc::now().to_rfc3339()),
+                        });
+                    }
+                }
+            }
+        }
+        let _ = app.emit(name, payload);
+    });
+}
+
+fn handle_incoming_inner(
+    state: &MeshState,
+    from_address: &str,
+    raw_json: &str,
+    emit: &mut dyn FnMut(&str, serde_json::Value),
+) {
     let ValidatedEnvelope {
         envelope,
         sender_encryption_public,
@@ -932,15 +1187,18 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
     if body.sender_id == state.node_id {
         return;
     }
-    if !state.mark_seen(&body.msg_id, body.created_at_ms) {
-        // ACK may have been lost. A duplicate signed text addressed to us is
-        // acknowledged again without emitting a duplicate chat message.
-        if body.msg_type == "text" && body.recipient_id == state.node_id {
+    let addressed_text = body.msg_type == "text" && body.recipient_id == state.node_id;
+    if state.has_seen(&body.msg_id) {
+        // ACK may have been lost. Re-ACK only when the message is already in
+        // the durable inbox or encrypted chat history. A seen-but-not-stored
+        // text means persist failed, so we must not acknowledge it.
+        if addressed_text && state.store.already_accepted(&body.msg_id) {
             send_ack(state, &body.sender_id, &body.msg_id);
         }
         return;
     }
     if !state.allow_incoming(&body.sender_id, now_ms()) {
+        state.mark_seen(&body.msg_id, body.created_at_ms);
         return;
     }
     let reject_unknown_chat = state
@@ -951,8 +1209,14 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
         && body.msg_type == "text"
         && !state.store.is_peer_trusted(&body.sender_id);
     if reject_unknown_chat {
+        state.mark_seen(&body.msg_id, body.created_at_ms);
         return;
     }
+    let already_known_peer = state
+        .known_pubkeys
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(&body.sender_id);
     if !state.remember_identity(
         &body.sender_id,
         sender_encryption_public,
@@ -962,6 +1226,9 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
     ) {
         return;
     }
+    if !addressed_text {
+        state.mark_seen(&body.msg_id, body.created_at_ms);
+    }
     match body.msg_type.as_str() {
         "presence" => {
             let sender_name = body
@@ -970,38 +1237,31 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
                 .unwrap_or_else(|| body.sender_id.clone());
             state.mark_connected(from_address);
             state.bind_address_to_peer(from_address, &body.sender_id, &sender_name);
-
-            let app_state = app.state::<crate::AppState>();
-            let mut peers = app_state.peers.lock().unwrap_or_else(|e| e.into_inner());
-            let existing = peers.iter_mut().find(|peer| peer.id == body.sender_id);
-            let already_known = existing.is_some();
-            if let Some(peer) = existing {
-                peer.name = sender_name.clone();
-                peer.online = true;
-                peer.last_seen = Some(chrono::Utc::now().to_rfc3339());
-            } else if peers.len() < MAX_STATE_PEERS {
-                peers.push(crate::Peer {
-                    id: body.sender_id.clone(),
-                    name: sender_name.clone(),
-                    online: true,
-                    last_seen: Some(chrono::Utc::now().to_rfc3339()),
-                });
-            } else {
-                return;
-            }
-            drop(peers);
-
-            let _ = app.emit(
+            let already_known = already_known_peer;
+            emit(
                 "peer_discovered",
                 serde_json::json!({
                     "id": body.sender_id,
                     "name": sender_name,
-                    "online": true
+                    "online": true,
+                    "linkStatus": "ready"
                 }),
             );
-            let _ = app.emit(
+            emit(
                 "peer_status",
-                serde_json::json!({ "id": body.sender_id, "online": true }),
+                serde_json::json!({
+                    "id": body.sender_id,
+                    "online": true,
+                    "linkStatus": "ready"
+                }),
+            );
+            emit(
+                "peer_link",
+                serde_json::json!({
+                    "id": body.sender_id,
+                    "address": from_address,
+                    "status": "ready"
+                }),
             );
             if !already_known {
                 let _ = send_presence(state, from_address);
@@ -1017,25 +1277,50 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
                     nonce,
                 ) {
                     if text.len() <= MAX_TEXT_BYTES {
-                        let _ = app.emit(
-                            "message_received",
-                            serde_json::json!({
-                                "id": body.msg_id,
-                                "peerId": body.sender_id,
-                                "text": text,
-                                "timestamp": body.created_at_ms
-                            }),
-                        );
+                        let stored = match state.store.enqueue_inbox(InboxRecord {
+                            msg_id: body.msg_id.clone(),
+                            peer_id: body.sender_id.clone(),
+                            text: text.clone(),
+                            timestamp_ms: body.created_at_ms,
+                            stored_at_ms: now_ms(),
+                        }) {
+                            Ok(stored) => stored,
+                            Err(error) => {
+                                eprintln!(
+                                    "void-mesh: inbox persist failed msg_id={} err={error}",
+                                    body.msg_id
+                                );
+                                return;
+                            }
+                        };
+                        state.mark_seen(&body.msg_id, body.created_at_ms);
+                        if stored {
+                            emit(
+                                "message_received",
+                                serde_json::json!({
+                                    "id": body.msg_id,
+                                    "peerId": body.sender_id,
+                                    "text": text,
+                                    "timestamp": body.created_at_ms
+                                }),
+                            );
+                        }
                         send_ack(state, &body.sender_id, &body.msg_id);
+                    } else {
+                        state.mark_seen(&body.msg_id, body.created_at_ms);
                     }
+                } else {
+                    state.mark_seen(&body.msg_id, body.created_at_ms);
                 }
+            } else {
+                state.mark_seen(&body.msg_id, body.created_at_ms);
             }
             return;
         }
         "ack" if body.recipient_id == state.node_id => {
             if let Some(ack_id) = &body.ack_msg_id {
                 let _ = state.store.remove_outbox(ack_id);
-                let _ = app.emit(
+                emit(
                     "message_ack_received",
                     serde_json::json!({
                         "msgId": ack_id,
@@ -1058,7 +1343,7 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
                     {
                         if let (Ok(lat), Ok(lon)) = (lat.parse::<f64>(), lon.parse::<f64>()) {
                             if validate_coordinates(lat, lon).is_ok() {
-                                let _ = app.emit(
+                                emit(
                                     "peer_location_received",
                                     serde_json::json!({
                                         "peerId": body.sender_id,
@@ -1085,7 +1370,7 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
             if should_emit {
                 received.insert(body.sender_id.clone(), Instant::now());
                 if let Some(sos) = &body.sos {
-                    let _ = app.emit(
+                    emit(
                         "sos_received",
                         serde_json::json!({
                             "id": body.msg_id,
@@ -1124,15 +1409,20 @@ mod tests {
 
     #[derive(Default)]
     struct MockTransport {
-        sent: Mutex<Vec<(String, String)>>,
+        sent: Mutex<Vec<(String, String, String)>>,
+        accept: Mutex<bool>,
     }
 
     impl MeshTransport for MockTransport {
-        fn send(&self, address: &str, payload: &str) -> Result<bool, String> {
-            self.sent
-                .lock()
-                .unwrap()
-                .push((address.to_string(), payload.to_string()));
+        fn send(&self, address: &str, payload: &str, msg_id: &str) -> Result<bool, String> {
+            if !*self.accept.lock().unwrap() {
+                return Ok(false);
+            }
+            self.sent.lock().unwrap().push((
+                address.to_string(),
+                payload.to_string(),
+                msg_id.to_string(),
+            ));
             Ok(true)
         }
     }
@@ -1146,13 +1436,40 @@ mod tests {
             .join(format!("void-mesh-test-{}", uuid::Uuid::new_v4()))
             .join("vault.json");
         let store = Arc::new(SecureStore::open(path, [seed; 32], now_ms()).unwrap());
-        let transport = Arc::new(MockTransport::default());
+        let transport = Arc::new(MockTransport {
+            sent: Mutex::new(Vec::new()),
+            accept: Mutex::new(true),
+        });
         let state = MeshState::new_inner(encryption, public, signing, id, store, transport.clone());
         (state, transport)
     }
 
     fn state(seed: u8) -> MeshState {
         state_with_transport(seed).0
+    }
+
+    fn deliver(state: &MeshState, from: &str, raw: &str) -> Vec<(String, serde_json::Value)> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_ref = events.clone();
+        handle_incoming_inner(state, from, raw, &mut |name, payload| {
+            events_ref
+                .lock()
+                .unwrap()
+                .push((name.to_string(), payload));
+        });
+        events.lock().unwrap().clone()
+    }
+
+    fn pair_alice_bob() -> (MeshState, Arc<MockTransport>, MeshState, Arc<MockTransport>) {
+        let (alice, alice_tx) = state_with_transport(30);
+        let (bob, bob_tx) = state_with_transport(40);
+        let bob_card = create_contact_card(&bob).unwrap();
+        import_contact_card(&alice, &bob_card).unwrap();
+        let alice_card = create_contact_card(&alice).unwrap();
+        import_contact_card(&bob, &alice_card).unwrap();
+        alice.mark_connected("bob-address");
+        bob.mark_connected("alice-address");
+        (alice, alice_tx, bob, bob_tx)
     }
 
     #[test]
@@ -1193,6 +1510,7 @@ mod tests {
 
         let result = send_text(&alice, &bob.node_id, "authenticated hello").unwrap();
         assert!(!result.queued);
+        assert_eq!(result.status, "transmitting");
         let payload = transport.sent.lock().unwrap().last().unwrap().1.clone();
         let validated = validate_envelope(&payload).unwrap();
         assert_eq!(validated.envelope.body.msg_id, result.msg_id);
@@ -1226,5 +1544,153 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] = if tampered[last] == b'A' { b'B' } else { b'A' };
         assert!(import_contact_card(&bob, &String::from_utf8(tampered).unwrap()).is_err());
+    }
+
+    #[test]
+    fn inbox_persists_without_listener_and_acks_only_after_store() {
+        let (alice, alice_tx, bob, bob_tx) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "offline delivery").unwrap();
+        let payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+
+        let events = deliver(&bob, "alice-address", &payload);
+        assert!(events.iter().any(|(name, _)| name == "message_received"));
+        assert!(bob.store.inbox_has(&result.msg_id));
+        assert!(bob_tx
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, json, _)| json.contains("\"msgType\":\"ack\"")));
+        assert_eq!(list_pending_inbox(&bob).len(), 1);
+    }
+
+    #[test]
+    fn restart_keeps_inbox_until_history_confirm() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "survives restart").unwrap();
+        let payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        deliver(&bob, "alice-address", &payload);
+        assert_eq!(bob.store.inbox()[0].text, "survives restart");
+        assert!(bob.store.already_accepted(&result.msg_id));
+        assert!(bob
+            .store
+            .confirm_inbox(&[result.msg_id.clone()])
+            .unwrap()
+            .is_empty());
+        bob.store
+            .save_chat_state(serde_json::json!({
+                "chats": [{ "id": "c1", "peerId": alice.node_id }],
+                "messages": { "c1": [{ "id": result.msg_id, "text": "survives restart" }] }
+            }))
+            .unwrap();
+        assert_eq!(
+            bob.store.confirm_inbox(&[result.msg_id.clone()]).unwrap(),
+            vec![result.msg_id.clone()]
+        );
+        assert!(bob.store.inbox().is_empty());
+        assert!(bob.store.already_accepted(&result.msg_id));
+    }
+
+    #[test]
+    fn persist_failure_does_not_ack() {
+        let (alice, alice_tx, bob, bob_tx) = pair_alice_bob();
+        send_text(&alice, &bob.node_id, "must not ack").unwrap();
+        let payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        bob.store.fail_next_persist();
+        let events = deliver(&bob, "alice-address", &payload);
+        assert!(!events.iter().any(|(name, _)| name == "message_received"));
+        assert!(bob.store.inbox().is_empty());
+        assert!(bob_tx
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, json, _)| !json.contains("\"msgType\":\"ack\"")));
+    }
+
+    #[test]
+    fn duplicate_after_lost_ack_reacks_once_stored() {
+        let (alice, alice_tx, bob, bob_tx) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "dup").unwrap();
+        let payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        deliver(&bob, "alice-address", &payload);
+        bob_tx.sent.lock().unwrap().clear();
+        let events = deliver(&bob, "alice-address", &payload);
+        assert!(!events.iter().any(|(name, _)| name == "message_received"));
+        assert_eq!(
+            bob.store
+                .inbox()
+                .iter()
+                .filter(|item| item.msg_id == result.msg_id)
+                .count(),
+            1
+        );
+        assert!(bob_tx
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, json, _)| json.contains("\"msgType\":\"ack\"")));
+    }
+
+    #[test]
+    fn outbox_does_not_double_queue_while_in_flight() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "once").unwrap();
+        assert_eq!(alice_tx.sent.lock().unwrap().len(), 1);
+        assert!(alice.store.outbox_item(&result.msg_id).unwrap().in_flight);
+        flush_outbox_inner(&alice, true);
+        assert_eq!(alice_tx.sent.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn flush_does_not_emit_transport_sent_on_queue_accept() {
+        let (alice, _, bob, _) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "queued is not sent").unwrap();
+        assert_eq!(result.status, "transmitting");
+        assert!(alice.store.outbox_item(&result.msg_id).is_some());
+    }
+
+    #[test]
+    fn reconnect_resumes_outbox_after_in_flight_reset() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+        let result = send_text(&alice, &bob.node_id, "retry later").unwrap();
+        alice_tx.sent.lock().unwrap().clear();
+        alice.store.reset_outbox_in_flight().unwrap();
+        flush_outbox_inner(&alice, true);
+        assert!(alice_tx
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, id)| id == &result.msg_id));
+    }
+
+    #[test]
+    fn many_messages_keep_distinct_mesh_ids() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+        let mut ids = Vec::new();
+        for index in 0..5 {
+            ids.push(send_text(&alice, &bob.node_id, &format!("burst {index}")).unwrap().msg_id);
+        }
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 5);
+        assert_eq!(alice_tx.sent.lock().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn peer_id_maps_to_single_ble_address() {
+        let state = state(7);
+        state.record_discovered_peer("AA:BB:CC:DD:EE:01", "ABCDEF01", "near", -40);
+        state.bind_address_to_peer("AA:BB:CC:DD:EE:01", &state.node_id, "me");
+        assert_eq!(
+            state.peer_id_for_address("AA:BB:CC:DD:EE:01").as_deref(),
+            Some(state.node_id.as_str())
+        );
+        assert_eq!(
+            state.find_address_by_peer_id(&state.node_id).as_deref(),
+            Some("AA:BB:CC:DD:EE:01")
+        );
     }
 }

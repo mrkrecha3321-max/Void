@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Avatar from '../components/Avatar';
 import type { Peer } from '../types';
+import { isPeerOnline, peerLinkLabel } from '../peerLink';
 import { Users, UserPlus, RadioReceiver, Hash, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { listen } from '@tauri-apps/api/event';
@@ -171,13 +172,13 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               transition={{ delay: i * 0.05 }}
               className="flex items-center px-4 py-3 gap-4 border-b border-border/50"
             >
-              <Avatar name={peer.name} size={48} online={peer.online} />
+              <Avatar name={peer.name} size={48} online={isPeerOnline(peer.linkStatus, peer.online)} />
               <div className="flex-1 flex flex-col overflow-hidden gap-0.5">
                 <span className="text-base font-semibold text-foreground truncate">
                   {peer.name || peer.id.slice(0, 8) + '...'}
                 </span>
-                <span className={`text-xs ${peer.online ? 'text-emerald-500' : 'text-muted-foreground'}`}>
-                  {peer.online ? 'Online' : 'Offline'}
+                <span className={`text-xs ${isPeerOnline(peer.linkStatus, peer.online) ? 'text-emerald-500' : 'text-muted-foreground'}`}>
+                  {peerLinkLabel(peer.linkStatus, peer.online)}
                 </span>
               </div>
               <button

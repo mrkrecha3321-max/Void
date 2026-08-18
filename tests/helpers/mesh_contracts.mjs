@@ -637,6 +637,35 @@ export function simulateDenseMesh(peerCount = 10) {
  *
  * @returns {object} Permission flow simulation result
  */
+export function applyBleDiscoveryToPeer(peer, advertisement) {
+  return {
+    ...peer,
+    id: peer.id || advertisement.shortId,
+    address: advertisement.address,
+    rssi: advertisement.rssi,
+    linkStatus: peer.linkStatus && peer.linkStatus !== 'disconnected' ? peer.linkStatus : 'discovered',
+    online: peer.linkStatus === 'ready',
+  };
+}
+
+export function mapPeerIdToAddress(bindings, peerId) {
+  const exact = bindings.find((item) => item.peerId === peerId);
+  if (exact) return exact.address;
+  return null;
+}
+
+export function queueOutboundMessages(queue, messages) {
+  const accepted = [];
+  for (const message of messages) {
+    if (queue.inFlight.has(message.msgId) || queue.items.some((item) => item.msgId === message.msgId)) {
+      continue;
+    }
+    queue.items.push({ ...message, state: 'queued' });
+    accepted.push(message.msgId);
+  }
+  return accepted;
+}
+
 export function simulateStartupPermissionFlow() {
   // Phase 1: Startup without permissions
   const initialParams = {
