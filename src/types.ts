@@ -1,4 +1,13 @@
-// R9 Core Domain Interfaces
+import type { PeerLinkStatus } from './peerLink';
+
+export type { PeerLinkStatus };
+export type MessageTransportStatus =
+  | 'queued'
+  | 'transmitting'
+  | 'transport_sent'
+  | 'delivered'
+  | 'failed';
+
 export interface Peer {
   id: string;
   name: string;
@@ -8,6 +17,7 @@ export interface Peer {
   address?: string;
   lat?: number;
   lon?: number;
+  linkStatus?: PeerLinkStatus;
 }
 
 export interface Chat {
@@ -21,6 +31,7 @@ export interface Chat {
 
 export interface Message {
   id: string | number;
+  clientKey?: string;
   chatId?: string;
   text: string;
   sent?: boolean;
@@ -28,6 +39,8 @@ export interface Message {
   delivered?: boolean;
   failed?: boolean;
   queued?: boolean;
+  transmitting?: boolean;
+  status?: MessageTransportStatus;
   error?: string;
 }
 
@@ -45,11 +58,26 @@ export interface PeerDiscoveredPayload {
   online: boolean;
   rssi?: number;
   address?: string;
+  linkStatus?: PeerLinkStatus;
 }
 
 export interface PeerStatusPayload {
   id: string;
   online: boolean;
+  linkStatus?: PeerLinkStatus;
+}
+
+export interface PeerLinkPayload {
+  id?: string;
+  address?: string;
+  status: PeerLinkStatus;
+}
+
+export interface InboxMessagePayload {
+  id: string;
+  peerId: string;
+  text: string;
+  timestamp: number;
 }
 
 export interface MessageAckPayload {
@@ -67,6 +95,7 @@ export interface PeerLocationPayload {
 export interface MeshSendResult {
   msgId: string;
   queued: boolean;
+  status?: MessageTransportStatus | string;
 }
 
 export interface CoreMeshSettings {

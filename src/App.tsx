@@ -19,6 +19,7 @@ import RadarScreen from "./screens/RadarScreen";
 import { useTheme } from "./hooks/useTheme";
 import { useMesh } from "./hooks/useMesh";
 import { useChats } from "./hooks/useChats";
+import { peerIdsMatch } from "./peerLink";
 
 type Tab = "chats" | "radar" | "contacts" | "menu";
 
@@ -44,7 +45,7 @@ const parseVersion = (value: string): [number, number, number] | null => {
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { peers, connected, connectedAddresses, nodeId, error: meshError, addPeer } = useMesh();
-  const { chats, messages, sendMessage, startChat, markRead, clearAllData } = useChats();
+  const { chats, messagesForChat, sendMessage, startChat, markRead, retryMessage, clearAllData } = useChats();
 
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
@@ -289,7 +290,7 @@ function App() {
         )}
       </AnimatePresence>
 
-      <main className="flex-1 flex overflow-hidden relative">
+      <main className="flex-1 min-h-0 min-w-0 flex overflow-hidden relative">
         {/* Left Sidebar (Desktop: visible always, Mobile: visible if no active chat) */}
         <div 
           className={`flex-shrink-0 w-full md:w-[360px] lg:w-[400px] flex flex-col border-r border-border/10 bg-background transition-transform
@@ -319,7 +320,7 @@ function App() {
 
         {/* Right Column (Desktop: visible always, Mobile: visible if active chat) */}
         <div 
-          className={`flex-1 flex flex-col relative bg-background/50
+          className={`flex-1 min-h-0 min-w-0 flex flex-col relative overflow-hidden bg-background/50
           ${!activeChat ? 'hidden md:flex' : 'flex'}
         `}>
           {/* Top Global Bar for Desktop when no chat is open, or combined in ChatView header */}
@@ -339,9 +340,18 @@ function App() {
             <ChatView
               chatId={activeChat.chatId}
               chatName={activeChat.peerName}
-              messages={messages[activeChat.chatId] || []}
+              messages={messagesForChat(activeChat.chatId)}
               onBack={handleBackFromChat}
               onSend={sendMessage}
+              onRetry={retryMessage}
+              peerOnline={peers.find(peer => {
+                const chat = chats.find(item => item.id === activeChat.chatId);
+                return !!chat && (peerIdsMatch(peer.id, chat.peerId) || peerIdsMatch(peer.id, chat.id));
+              })?.online}
+              peerLinkStatus={peers.find(peer => {
+                const chat = chats.find(item => item.id === activeChat.chatId);
+                return !!chat && (peerIdsMatch(peer.id, chat.peerId) || peerIdsMatch(peer.id, chat.id));
+              })?.linkStatus}
               onOpenSettings={() => setShowSettings(true)}
             />
           ) : (

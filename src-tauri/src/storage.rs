@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -17,6 +18,7 @@ const MAX_VAULT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHAT_STATE_BYTES: usize = 1024 * 1024;
 const MAX_PEERS: usize = 2_048;
 const MAX_OUTBOX: usize = 500;
+const MAX_INBOX: usize = 1_000;
 const MAX_REPLAY_IDS: usize = 10_000;
 const REPLAY_COMPACT_BYTES: u64 = 2 * 1024 * 1024;
 const REPLAY_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
@@ -62,6 +64,24 @@ pub struct OutboxRecord {
     pub msg_id: String,
     pub envelope_json: String,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub last_attempt_at_ms: u64,
+    #[serde(default)]
+    pub attempt_count: u32,
+    #[serde(default)]
+    pub in_flight: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxRecord {
+    pub msg_id: String,
+    pub peer_id: String,
+    pub text: String,
+    pub timestamp_ms: u64,
+    pub stored_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +100,8 @@ struct VaultData {
     pub trusted_contact_ids: HashSet<String>,
     pub contact_names: HashMap<String, String>,
     pub outbox: Vec<OutboxRecord>,
+    #[serde(default)]
+    pub inbox: Vec<InboxRecord>,
     pub chat_state: serde_json::Value,
     pub settings: CoreSettings,
 }
@@ -92,6 +114,7 @@ impl Default for VaultData {
             trusted_contact_ids: HashSet::new(),
             contact_names: HashMap::new(),
             outbox: Vec::new(),
+            inbox: Vec::new(),
             chat_state: serde_json::json!({ "chats": [], "messages": {} }),
             settings: CoreSettings::default(),
         }
@@ -123,6 +146,7 @@ pub struct SecureStore {
     key: Zeroizing<[u8; 32]>,
     state: Mutex<StoreState>,
     replay_io: Mutex<()>,
+    fail_next_persist: AtomicBool,
 }
 
 impl SecureStore {
@@ -137,12 +161,20 @@ impl SecureStore {
             key,
             state: Mutex::new(StoreState { data, replay_ids }),
             replay_io: Mutex::new(()),
+            fail_next_persist: AtomicBool::new(false),
         };
         if !store.vault_path.exists() {
             let guard = store.state.lock().map_err(|e| e.to_string())?;
             store.persist_locked(&guard.data)?;
         }
+        // A previous process crash may have left in_flight=true. Those
+        // transmissions are no longer running, so they must be retryable.
+        let _ = store.reset_outbox_in_flight();
         Ok(store)
+    }
+
+    pub fn fail_next_persist(&self) {
+        self.fail_next_persist.store(true, Ordering::SeqCst);
     }
 
     pub fn settings(&self) -> CoreSettings {
@@ -334,6 +366,89 @@ impl SecureStore {
             .collect()
     }
 
+    pub fn inbox(&self) -> Vec<InboxRecord> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .inbox
+            .clone()
+    }
+
+    pub fn inbox_has(&self, msg_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .inbox
+            .iter()
+            .any(|item| item.msg_id == msg_id)
+    }
+
+    #[allow(dead_code)]
+    pub fn history_has_message(&self, msg_id: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        collect_history_ids(&state.data.chat_state).contains(msg_id)
+    }
+
+    pub fn already_accepted(&self, msg_id: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.data.inbox.iter().any(|item| item.msg_id == msg_id)
+            || collect_history_ids(&state.data.chat_state).contains(msg_id)
+    }
+
+    /// Persist a decrypted, verified message. Returns Ok(true) when newly
+    /// stored, Ok(false) when the same msgId is already in inbox or history.
+    pub fn enqueue_inbox(&self, item: InboxRecord) -> Result<bool, String> {
+        if item.text.len() > 2_048 || item.msg_id.len() > 64 || item.peer_id.len() > 64 {
+            return Err("Nieprawidlowy rekord inbox".to_string());
+        }
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if state
+            .data
+            .inbox
+            .iter()
+            .any(|queued| queued.msg_id == item.msg_id)
+            || collect_history_ids(&state.data.chat_state).contains(&item.msg_id)
+        {
+            return Ok(false);
+        }
+        if state.data.inbox.len() >= MAX_INBOX {
+            return Err("Inbox jest pelny".to_string());
+        }
+        let mut next = state.data.clone();
+        next.inbox.push(item);
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(true)
+    }
+
+    /// Remove inbox records only after they exist in encrypted chat history.
+    /// A crash between peek and this call leaves the records in inbox.
+    pub fn confirm_inbox(&self, ids: &[String]) -> Result<Vec<String>, String> {
+        if ids.len() > MAX_INBOX {
+            return Err("Zbyt wiele potwierdzen inbox".to_string());
+        }
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let history = collect_history_ids(&state.data.chat_state);
+        let mut next = state.data.clone();
+        let mut removed = Vec::new();
+        next.inbox.retain(|item| {
+            if ids.iter().any(|id| id == &item.msg_id) && history.contains(&item.msg_id) {
+                removed.push(item.msg_id.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if removed.is_empty() {
+            return Ok(removed);
+        }
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(removed)
+    }
+
     pub fn enqueue_outbox(&self, item: OutboxRecord) -> Result<(), String> {
         if item.envelope_json.len() > 4_080 {
             return Err("Koperta outbox jest zbyt duza".to_string());
@@ -350,8 +465,85 @@ impl SecureStore {
         if state.data.outbox.len() >= MAX_OUTBOX {
             return Err("Outbox jest pelny".to_string());
         }
-        state.data.outbox.push(item);
-        self.persist_locked(&state.data)
+        let mut next = state.data.clone();
+        next.outbox.push(item);
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(())
+    }
+
+    pub fn outbox_item(&self, msg_id: &str) -> Option<OutboxRecord> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .outbox
+            .iter()
+            .find(|item| item.msg_id == msg_id)
+            .cloned()
+    }
+
+    pub fn mark_outbox_attempt(
+        &self,
+        msg_id: &str,
+        now_ms: u64,
+        in_flight: bool,
+    ) -> Result<Option<OutboxRecord>, String> {
+        self.mutate_outbox(msg_id, |item| {
+            item.last_attempt_at_ms = now_ms;
+            item.attempt_count = item.attempt_count.saturating_add(1);
+            item.in_flight = in_flight;
+        })
+    }
+
+    pub fn mark_outbox_in_flight(
+        &self,
+        msg_id: &str,
+        in_flight: bool,
+        error: Option<String>,
+    ) -> Result<Option<OutboxRecord>, String> {
+        self.mutate_outbox(msg_id, |item| {
+            item.in_flight = in_flight;
+            if let Some(error) = error {
+                item.last_error = Some(error);
+            }
+        })
+    }
+
+    pub fn reset_outbox_in_flight(&self) -> Result<bool, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if !state.data.outbox.iter().any(|item| item.in_flight) {
+            return Ok(false);
+        }
+        let mut next = state.data.clone();
+        for item in &mut next.outbox {
+            item.in_flight = false;
+        }
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(true)
+    }
+
+    fn mutate_outbox(
+        &self,
+        msg_id: &str,
+        mutate: impl FnOnce(&mut OutboxRecord),
+    ) -> Result<Option<OutboxRecord>, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let Some(index) = state
+            .data
+            .outbox
+            .iter()
+            .position(|item| item.msg_id == msg_id)
+        else {
+            return Ok(None);
+        };
+        let mut next = state.data.clone();
+        mutate(&mut next.outbox[index]);
+        let updated = next.outbox[index].clone();
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(Some(updated))
     }
 
     pub fn prune_outbox(&self, now_ms: u64) -> Result<Vec<String>, String> {
@@ -391,6 +583,9 @@ impl SecureStore {
     }
 
     fn persist_locked(&self, data: &VaultData) -> Result<(), String> {
+        if self.fail_next_persist.swap(false, Ordering::SeqCst) {
+            return Err("Nie mozna zapisac vault".to_string());
+        }
         validate_vault_data(data)?;
         let plaintext = serde_json::to_vec(data).map_err(|e| e.to_string())?;
         let envelope = seal_bytes(&self.key, &plaintext)?;
@@ -410,10 +605,31 @@ fn validate_vault_data(data: &VaultData) -> Result<(), String> {
         || data.trusted_contact_ids.len() > MAX_PEERS
         || data.contact_names.len() > MAX_PEERS
         || data.outbox.len() > MAX_OUTBOX
+        || data.inbox.len() > MAX_INBOX
     {
         return Err("Vault przekracza limity rekordow".to_string());
     }
     validate_chat_shape(&data.chat_state)
+}
+
+fn collect_history_ids(chat_state: &serde_json::Value) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    let Some(messages) = chat_state.get("messages").and_then(|value| value.as_object()) else {
+        return ids;
+    };
+    for entry in messages.values() {
+        let Some(list) = entry.as_array() else {
+            continue;
+        };
+        for message in list {
+            if let Some(id) = message.get("id").and_then(|value| value.as_str()) {
+                ids.insert(id.to_string());
+            } else if let Some(id) = message.get("id").and_then(|value| value.as_u64()) {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids
 }
 
 fn validate_chat_shape(value: &serde_json::Value) -> Result<(), String> {
@@ -648,6 +864,94 @@ mod tests {
         );
         drop(reopened);
         assert!(SecureStore::open(path, [9u8; 32], 1_000).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inbox_survives_reopen_and_confirm_requires_history() {
+        let root = std::env::temp_dir().join(format!("void-inbox-test-{}", uuid::Uuid::new_v4()));
+        let path = root.join("vault.json");
+        let store = SecureStore::open(path.clone(), [5u8; 32], 1_000).unwrap();
+        let msg_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        assert!(store
+            .enqueue_inbox(InboxRecord {
+                msg_id: msg_id.to_string(),
+                peer_id: "VX-11111111111111111111111111111111".to_string(),
+                text: "hello".to_string(),
+                timestamp_ms: 2_000,
+                stored_at_ms: 2_000,
+            })
+            .unwrap());
+        assert!(store.inbox_has(msg_id));
+        assert!(store.already_accepted(msg_id));
+        assert!(store.confirm_inbox(&[msg_id.to_string()]).unwrap().is_empty());
+        drop(store);
+
+        let reopened = SecureStore::open(path.clone(), [5u8; 32], 2_000).unwrap();
+        assert_eq!(reopened.inbox().len(), 1);
+        reopened
+            .save_chat_state(serde_json::json!({
+                "chats": [{ "id": "chat-1", "peerId": "VX-11111111111111111111111111111111" }],
+                "messages": { "chat-1": [{ "id": msg_id, "text": "hello" }] }
+            }))
+            .unwrap();
+        assert_eq!(
+            reopened.confirm_inbox(&[msg_id.to_string()]).unwrap(),
+            vec![msg_id.to_string()]
+        );
+        assert!(reopened.inbox().is_empty());
+        assert!(reopened.already_accepted(msg_id));
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn inbox_persist_failure_does_not_keep_record() {
+        let root = std::env::temp_dir().join(format!("void-inbox-fail-{}", uuid::Uuid::new_v4()));
+        let path = root.join("vault.json");
+        let store = SecureStore::open(path, [6u8; 32], 1_000).unwrap();
+        store.fail_next_persist();
+        let result = store.enqueue_inbox(InboxRecord {
+            msg_id: "bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+            peer_id: "VX-11111111111111111111111111111111".to_string(),
+            text: "lost".to_string(),
+            timestamp_ms: 1,
+            stored_at_ms: 1,
+        });
+        assert!(result.is_err());
+        assert!(store.inbox().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_does_not_double_enqueue_same_msg_id() {
+        let root = std::env::temp_dir().join(format!("void-outbox-{}", uuid::Uuid::new_v4()));
+        let path = root.join("vault.json");
+        let store = SecureStore::open(path, [8u8; 32], 1_000).unwrap();
+        let item = OutboxRecord {
+            msg_id: "cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+            envelope_json: "{}".to_string(),
+            created_at_ms: 1,
+            last_attempt_at_ms: 0,
+            attempt_count: 0,
+            in_flight: false,
+            last_error: None,
+        };
+        store.enqueue_outbox(item.clone()).unwrap();
+        store.enqueue_outbox(item).unwrap();
+        assert_eq!(store.outbox(1).len(), 1);
+        store
+            .mark_outbox_attempt("cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee", 50, true)
+            .unwrap();
+        assert!(store
+            .outbox_item("cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .unwrap()
+            .in_flight);
+        store.reset_outbox_in_flight().unwrap();
+        assert!(!store
+            .outbox_item("cccccccc-bbbb-cccc-dddd-eeeeeeeeeeee")
+            .unwrap()
+            .in_flight);
         let _ = std::fs::remove_dir_all(root);
     }
 }

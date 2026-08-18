@@ -11,6 +11,7 @@ mod backup;
 mod crypto;
 mod mesh;
 mod native_bridge;
+mod reliability;
 mod storage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +60,7 @@ async fn start_mesh(app: tauri::AppHandle, state: State<'_, AppState>) -> Result
     let name = mesh.node_name.lock().map_err(|e| e.to_string())?.clone();
     let settings = mesh.settings.lock().map_err(|e| e.to_string())?.clone();
     ble_init(state, mesh, name)?;
+    native_bridge::calls::ensure_mesh_service()?;
     native_bridge::calls::update_settings(settings.hide_node, settings.battery_save)?;
     if !ble_start_advertising()? {
         return Err("Nie udalo sie uruchomic BLE advertising".to_string());
@@ -66,6 +68,7 @@ async fn start_mesh(app: tauri::AppHandle, state: State<'_, AppState>) -> Result
     if !ble_start_scanning()? {
         return Err("Nie udalo sie uruchomic skanowania BLE".to_string());
     }
+    native_bridge::calls::set_rust_ready()?;
     Ok("BLE Mesh uruchomiony".to_string())
 }
 
@@ -353,6 +356,24 @@ fn mesh_flush_outbox(app: tauri::AppHandle, mesh: State<'_, mesh::MeshState>) {
 }
 
 #[tauri::command]
+fn mesh_retry_message(mesh: State<'_, mesh::MeshState>, msg_id: String) -> Result<String, String> {
+    if msg_id.is_empty() || msg_id.len() > 64 {
+        return Err("Nieprawidlowy identyfikator wiadomosci".to_string());
+    }
+    mesh::retry_outbox_item(&mesh, &msg_id)
+}
+
+#[tauri::command]
+fn list_pending_inbox(mesh: State<'_, mesh::MeshState>) -> Vec<mesh::InboxMessage> {
+    mesh::list_pending_inbox(&mesh)
+}
+
+#[tauri::command]
+fn confirm_inbox(mesh: State<'_, mesh::MeshState>, ids: Vec<String>) -> Result<Vec<String>, String> {
+    mesh::confirm_inbox(&mesh, ids)
+}
+
+#[tauri::command]
 fn mesh_send_sos(
     mesh: State<'_, mesh::MeshState>,
     name: String,
@@ -379,11 +400,15 @@ fn ble_stop_scanning() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn ble_send_message(address: String, text: String) -> Result<bool, String> {
-    if address.len() > 32 || text.len() > mesh::MAX_ENVELOPE_BYTES {
+fn ble_send_message(address: String, text: String, msg_id: String) -> Result<bool, String> {
+    if address.len() > 32
+        || text.len() > mesh::MAX_ENVELOPE_BYTES
+        || msg_id.is_empty()
+        || msg_id.len() > 64
+    {
         return Err("Nieprawidlowy rozmiar danych BLE".to_string());
     }
-    native_bridge::calls::send_message(&address, &text)
+    native_bridge::calls::send_message(&address, &text, &msg_id)
 }
 
 #[tauri::command]
@@ -497,6 +522,9 @@ pub fn run() {
             mesh_send_text,
             mesh_send_location,
             mesh_flush_outbox,
+            mesh_retry_message,
+            list_pending_inbox,
+            confirm_inbox,
             mesh_send_sos,
             get_connected_addresses
         ])

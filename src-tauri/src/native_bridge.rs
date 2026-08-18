@@ -75,6 +75,19 @@ mod android {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onPeerConnecting(
+        mut env: JNIEnv,
+        _this: JObject,
+        address: JString,
+    ) {
+        let address = jstr(&mut env, &address);
+        emit(
+            "ble_peer_connecting",
+            serde_json::json!({ "address": address }),
+        );
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onPeerConnected(
         mut env: JNIEnv,
         _this: JObject,
@@ -116,7 +129,19 @@ mod android {
                     }
                     let _ = app.emit(
                         "peer_status",
-                        serde_json::json!({ "id": peer_id, "online": false }),
+                        serde_json::json!({
+                            "id": peer_id,
+                            "online": false,
+                            "linkStatus": "disconnected"
+                        }),
+                    );
+                    let _ = app.emit(
+                        "peer_link",
+                        serde_json::json!({
+                            "id": peer_id,
+                            "address": address,
+                            "status": "disconnected"
+                        }),
                     );
                 }
             }
@@ -488,8 +513,14 @@ pub mod calls {
     pub fn update_settings(_hidden: bool, _battery_save: bool) -> Result<(), String> {
         Ok(())
     }
-    pub fn send_message(_address: &str, _text: &str) -> Result<bool, String> {
+    pub fn send_message(_address: &str, _text: &str, _msg_id: &str) -> Result<bool, String> {
         Err("BLE dostepne tylko na Androidzie".into())
+    }
+    pub fn set_rust_ready() -> Result<(), String> {
+        Ok(())
+    }
+    pub fn ensure_mesh_service() -> Result<(), String> {
+        Ok(())
     }
     pub fn connect_to_peer(_address: &str) -> Result<bool, String> {
         Err("BLE dostepne tylko na Androidzie".into())

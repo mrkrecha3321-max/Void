@@ -1,4 +1,7 @@
 <resources>
     <string name="app_name">"Void"</string>
     <string name="main_activity_title">"Void"</string>
+    <string name="mesh_notification_channel">"VOID Mesh"</string>
+    <string name="mesh_notification_title">"VOID"</string>
+    <string name="mesh_notification_text">"Mesh Bluetooth aktywny"</string>
 </resources>

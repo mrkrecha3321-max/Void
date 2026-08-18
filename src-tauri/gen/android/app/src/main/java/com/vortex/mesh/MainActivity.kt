@@ -41,16 +41,22 @@ class MainActivity : TauriActivity() {
     requestBlePermissionsIfNeeded()
   }
 
-  private fun requiredBlePermissions(): List<String> =
+  private fun requiredBlePermissions(): List<String> {
+    val permissions = mutableListOf<String>()
     if (Build.VERSION.SDK_INT >= 31) {
-      listOf(
+      permissions += listOf(
         android.Manifest.permission.BLUETOOTH_SCAN,
         android.Manifest.permission.BLUETOOTH_ADVERTISE,
         android.Manifest.permission.BLUETOOTH_CONNECT
       )
     } else {
-      listOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+      permissions += android.Manifest.permission.ACCESS_FINE_LOCATION
     }
+    if (Build.VERSION.SDK_INT >= 33) {
+      permissions += android.Manifest.permission.POST_NOTIFICATIONS
+    }
+    return permissions
+  }
 
   private fun requestBlePermissionsIfNeeded() {
     val missing = requiredBlePermissions().filter {
@@ -69,7 +75,9 @@ class MainActivity : TauriActivity() {
     super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     if (requestCode != BLE_PERMISSION_REQUEST) return
 
-    val requiredGranted = requiredBlePermissions().all {
+    val requiredGranted = requiredBlePermissions().filterNot {
+      it == android.Manifest.permission.POST_NOTIFICATIONS
+    }.all {
       ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
     android.util.Log.i("MainActivity", "BLE permissions granted=$requiredGranted")
@@ -102,12 +110,8 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
-    try {
-      BleManager.stopScanning(this)
-      BleManager.stopAdvertising(this)
-    } catch (error: Throwable) {
-      android.util.Log.w("MainActivity", "BLE cleanup failed", error)
-    }
+    // BLE is owned by MeshForegroundService so Activity teardown must not
+    // tear down scan/advertise/GATT. That is what killed background delivery.
     if (instance === this) instance = null
     super.onDestroy()
   }

@@ -27,20 +27,18 @@ Protokół v2 celowo nie przyjmuje kopert ze starego, niepodpisanego formatu.
 
 ## Transport BLE
 
-Każda wiadomość jest ramkowana, również gdy mieści się w jednym fragmencie:
+Każda wiadomość jest ramkowana, również gdy mieści się w jednym fragmencie. Aktualny nadawca używa framingu v2, którego payload wynika z wynegocjowanego MTU (`MTU - 3 - 7`). Odbiorca nadal akceptuje legacy v1.
 
-```text
-+-------------------+-------------------+-------------------+-------------------+------------------------+
-| 1B marker (0x00)  | 2B Message ID     | 1B total chunks   | 1B chunk index    | max 16B payload        |
-+-------------------+-------------------+-------------------+-------------------+------------------------+
-```
+Szczegóły ramek, stanów `queued/transmitting/transport_sent/delivered` oraz cyklu inbox→ACK są w [`docs/PROTOKOL_TRANSPORT.md`](docs/PROTOKOL_TRANSPORT.md).
 
-- maksymalnie 255 fragmentów i 4080 bajtów wiadomości transportowej;
+- maksymalnie 2048 fragmentów v2 i 4080 bajtów wiadomości transportowej;
 - bufory są izolowane przez `(adres urządzenia, Message ID)`;
 - niedokończone bufory wygasają po 30 sekundach;
 - obowiązują limity globalne i per urządzenie;
-- zapisy GATT i notyfikacje korzystają z kolejki — kolejny fragment startuje dopiero po callbacku poprzedniego;
-- nieudane fragmenty są ponawiane z limitem prób.
+- zapisy GATT i notyfikacje korzystają z kolejki wiadomości powiązanej z mesh `msgId`;
+- kolejny fragment startuje dopiero po callbacku poprzedniego;
+- nieudane fragmenty są ponawiane z limitem prób, a błąd środka przerywa tylko tę wiadomość;
+- skan, advertising i GATT utrzymuje foreground service typu `connectedDevice`.
 
 ## Lokalny zaszyfrowany vault
 

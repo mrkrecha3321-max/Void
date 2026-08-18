@@ -1,6 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
+  confirmInbox,
+  listPendingInbox,
   loadChatState,
+  meshRetryMessage,
   meshSendText,
   onMessageAckReceived,
   onMessageReceived,
@@ -9,7 +12,8 @@ import {
   onPeerDiscovered,
   saveChatState,
 } from '../api';
-import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload } from '../types';
+import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload, InboxMessagePayload } from '../types';
+import { peerIdsMatch, preferFullPeerId } from '../peerLink';
 
 const localId = (prefix: string): string => {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -39,6 +43,82 @@ export function useChats() {
   useEffect(() => {
     chatsRef.current = chats;
   }, [chats]);
+
+  const findChat = useCallback((peerId: string): Chat | undefined => {
+    return chatsRef.current.find(chat =>
+      peerIdsMatch(chat.peerId, peerId) || peerIdsMatch(chat.id, peerId)
+    );
+  }, []);
+
+  const ingestIncoming = useCallback((payload: InboxMessagePayload | MessageReceivedPayload) => {
+    const msgDate = new Date(payload.timestamp);
+    const timestamp = isNaN(msgDate.getTime()) ? new Date() : msgDate;
+    const existing = findChat(payload.peerId);
+    const chatId = existing?.id || localId('chat');
+
+    const incomingMsg: Message = {
+      id: payload.id || localId('received-message'),
+      clientKey: payload.id || localId('received-row'),
+      chatId,
+      text: payload.text,
+      sent: false,
+      timestamp,
+    };
+
+    setMessages(prev => {
+      if (Object.values(prev).some(chatMessages =>
+        chatMessages.some(message => message.id === incomingMsg.id || message.clientKey === incomingMsg.clientKey)
+      )) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [chatId]: [...(prev[chatId] || []), incomingMsg],
+      };
+    });
+
+    setChats(prev => {
+      const index = prev.findIndex(c =>
+        c.id === chatId || peerIdsMatch(c.peerId, payload.peerId) || peerIdsMatch(c.id, payload.peerId)
+      );
+      if (index >= 0) {
+        const updated = prev.map((c, i) =>
+          i === index
+            ? {
+                ...c,
+                peerId: preferFullPeerId(c.peerId, payload.peerId),
+                lastMessage: payload.text,
+                lastMessageTime: timestamp,
+                unreadCount: c.unreadCount + 1,
+              }
+            : c
+        );
+        chatsRef.current = updated;
+        return updated;
+      }
+      const newChat: Chat = {
+        id: chatId,
+        peerId: payload.peerId,
+        peerName: payload.peerId,
+        lastMessage: payload.text,
+        lastMessageTime: timestamp,
+        unreadCount: 1,
+      };
+      chatsRef.current = [newChat, ...chatsRef.current];
+      return [newChat, ...prev];
+    });
+  }, [findChat]);
+
+  const drainInboxIntoState = useCallback(async (active = true) => {
+    if (!(window as any)['__TAURI_INTERNALS__']) return;
+    try {
+      const pending = await listPendingInbox();
+      if (!active || !Array.isArray(pending)) return;
+      pending.forEach(ingestIncoming);
+    } catch (error) {
+      console.warn('Nie udało się odczytać trwałego inbox:', error);
+    }
+  }, [ingestIncoming]);
 
   useEffect(() => {
     let active = true;
@@ -79,6 +159,7 @@ export function useChats() {
         setChats(restoredChats);
         setMessages(finalMessages);
         chatsRef.current = restoredChats;
+        await drainInboxIntoState(active);
       } catch (error) {
         console.error('Nie udało się odczytać zaszyfrowanej historii:', error);
       } finally {
@@ -86,8 +167,19 @@ export function useChats() {
       }
     };
     void restore();
-    return () => { active = false; };
-  }, []);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        void drainInboxIntoState(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      active = false;
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [drainInboxIntoState]);
 
   useEffect(() => {
     if (!hydrated || !(window as any)['__TAURI_INTERNALS__']) return;
@@ -103,7 +195,15 @@ export function useChats() {
       } catch {
         // Invalid local UI preferences do not block encrypted persistence.
       }
-      void saveChatState({ chats: chats.slice(0, 500), messages: persistedMessages }).catch(error => {
+      void saveChatState({ chats: chats.slice(0, 500), messages: persistedMessages }).then(async () => {
+        const receivedIds = Object.values(persistedMessages)
+          .flat()
+          .filter(message => !message.sent)
+          .map(message => String(message.id));
+        if (receivedIds.length > 0) {
+          await confirmInbox(receivedIds).catch(() => {});
+        }
+      }).catch(error => {
         console.error('Nie udało się zapisać zaszyfrowanej historii:', error);
       });
     }, 500);
@@ -144,16 +244,20 @@ export function useChats() {
       const peerName = payload.name || peerId;
 
       setChats(prev => {
-        const existingIndex = prev.findIndex(c => c.peerId === peerId || c.id === peerId);
+        const existingIndex = prev.findIndex(c =>
+          peerIdsMatch(c.peerId, peerId) || peerIdsMatch(c.id, peerId)
+        );
         if (existingIndex < 0) return prev;
         const existing = prev[existingIndex];
-        if (existing.peerName === existing.peerId && peerName !== existing.peerId) {
-          const updated = [...prev];
-          updated[existingIndex] = { ...existing, peerName };
-          chatsRef.current = updated;
-          return updated;
-        }
-        return prev;
+        const nextPeerId = preferFullPeerId(existing.peerId, peerId);
+        const nextName = existing.peerName === existing.peerId && peerName !== existing.peerId
+          ? peerName
+          : existing.peerName;
+        if (nextPeerId === existing.peerId && nextName === existing.peerName) return prev;
+        const updated = [...prev];
+        updated[existingIndex] = { ...existing, peerId: nextPeerId, peerName: nextName };
+        chatsRef.current = updated;
+        return updated;
       });
     });
 
@@ -163,8 +267,21 @@ export function useChats() {
   }, []);
 
   const startChat = useCallback((peerId: string, peerName: string): string => {
-    const existing = chatsRef.current.find(c => c.peerId === peerId || c.id === peerId);
-    if (existing) return existing.id;
+    const existing = chatsRef.current.find(c =>
+      peerIdsMatch(c.peerId, peerId) || peerIdsMatch(c.id, peerId)
+    );
+    if (existing) {
+      if (preferFullPeerId(existing.peerId, peerId) !== existing.peerId) {
+        const upgraded = chatsRef.current.map(chat =>
+          chat.id === existing.id
+            ? { ...chat, peerId: preferFullPeerId(chat.peerId, peerId), peerName: peerName || chat.peerName }
+            : chat
+        );
+        chatsRef.current = upgraded;
+        setChats(upgraded);
+      }
+      return existing.id;
+    }
 
     const chatId = localId('chat');
     const newChat: Chat = {
@@ -190,7 +307,7 @@ export function useChats() {
         ...prev,
         [chatId]: (prev[chatId] || []).map(message =>
           message.id === msgId && !message.delivered
-            ? { ...message, failed: true, queued: false, error: 'Brak potwierdzenia dostarczenia w ciągu 60 sekund' }
+            ? { ...message, failed: true, queued: false, transmitting: false, status: 'failed', error: 'Brak potwierdzenia dostarczenia w ciągu 60 sekund' }
             : message
         ),
       }));
@@ -206,10 +323,13 @@ export function useChats() {
     const tempId = localId('pending-message');
     const msg: Message = {
       id: tempId,
+      clientKey: tempId,
       chatId,
       text,
       sent: true,
       timestamp: new Date(),
+      status: 'queued',
+      queued: true,
     };
     
     setMessages(prev => ({
@@ -226,22 +346,29 @@ export function useChats() {
     
     try {
       const result = await meshSendText(recipientId, text);
-      // Replace the local ID with the signed mesh ID so ACKs can match it.
+      const status = result.status === 'transmitting' || !result.queued ? 'transmitting' : 'queued';
       setMessages(prev => ({
         ...prev,
         [chatId]: (prev[chatId] || []).map(message =>
           message.id === tempId
-            ? { ...message, id: result.msgId, queued: result.queued, failed: false }
+            ? {
+                ...message,
+                id: result.msgId,
+                queued: status === 'queued',
+                transmitting: status === 'transmitting',
+                failed: false,
+                status,
+              }
             : message
         ),
       }));
-      if (!result.queued) armDeliveryTimer(result.msgId, chatId);
+      if (status === 'transmitting') armDeliveryTimer(result.msgId, chatId);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       setMessages(prev => ({
         ...prev,
         [chatId]: (prev[chatId] || []).map(message =>
-          message.id === tempId ? { ...message, failed: true, error } : message
+          message.id === tempId ? { ...message, failed: true, queued: false, transmitting: false, status: 'failed', error } : message
         ),
       }));
     }
@@ -270,6 +397,31 @@ export function useChats() {
     }));
   }, []);
 
+  const messagesForChat = useCallback((chatId: string): Message[] => {
+    const chat = chats.find(candidate => candidate.id === chatId);
+    const relatedIds = chats
+      .filter(candidate =>
+        candidate.id === chatId || (chat ? peerIdsMatch(candidate.peerId, chat.peerId) : false)
+      )
+      .map(candidate => candidate.id);
+    const ids = relatedIds.length > 0 ? relatedIds : [chatId];
+    const seen = new Set<string>();
+    const merged: Message[] = [];
+    for (const id of ids) {
+      for (const message of messages[id] || []) {
+        const key = String(message.id);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(message);
+      }
+    }
+    return merged.sort((left, right) => {
+      const a = new Date(left.timestamp).getTime();
+      const b = new Date(right.timestamp).getTime();
+      return (Number.isFinite(a) ? a : 0) - (Number.isFinite(b) ? b : 0);
+    });
+  }, [chats, messages]);
+
   const markRead = useCallback((chatId: string) => {
     setChats(prev => {
       const updated = prev.map(chat =>
@@ -282,65 +434,7 @@ export function useChats() {
 
   useEffect(() => {
     const unlistenPromise = onMessageReceived((payload: MessageReceivedPayload) => {
-      const msgDate = new Date(payload.timestamp);
-      const timestamp = isNaN(msgDate.getTime()) ? new Date() : msgDate;
-
-      let chatId: string;
-      const existing = chatsRef.current.find(c => c.peerId === payload.peerId || c.id === payload.peerId);
-      if (existing) {
-        chatId = existing.id;
-      } else {
-        chatId = localId('chat');
-      }
-
-      const incomingMsg: Message = {
-        id: payload.id || localId('received-message'),
-        chatId,
-        text: payload.text,
-        sent: false,
-        timestamp,
-      };
-
-      setMessages(prev => {
-        if (Object.values(prev).some(chatMessages =>
-          chatMessages.some(message => message.id === incomingMsg.id)
-        )) {
-          return prev;
-        }
-        return {
-          ...prev,
-          [chatId]: [...(prev[chatId] || []), incomingMsg],
-        };
-      });
-
-      setChats(prev => {
-        const index = prev.findIndex(c => c.id === chatId || c.peerId === payload.peerId);
-        if (index >= 0) {
-          const updated = prev.map((c, i) =>
-            i === index
-              ? {
-                  ...c,
-                  lastMessage: payload.text,
-                  lastMessageTime: timestamp,
-                  unreadCount: c.unreadCount + 1,
-                }
-              : c
-          );
-          chatsRef.current = updated;
-          return updated;
-        } else {
-          const newChat: Chat = {
-            id: chatId,
-            peerId: payload.peerId,
-            peerName: payload.peerId,
-            lastMessage: payload.text,
-            lastMessageTime: timestamp,
-            unreadCount: 1,
-          };
-          chatsRef.current = [newChat, ...chatsRef.current];
-          return [newChat, ...prev];
-        }
-      });
+      ingestIncoming(payload);
     });
 
     const unlistenAckPromise = onMessageAckReceived((payload: MessageAckPayload) => {
@@ -359,7 +453,7 @@ export function useChats() {
           const updatedMsgs = msgs.map(m => {
             if (m.id === payload.msgId) {
               modified = true;
-              return { ...m, delivered: true, queued: false, failed: false, error: undefined };
+              return { ...m, delivered: true, queued: false, transmitting: false, failed: false, status: 'delivered' as const, error: undefined };
             }
             return m;
           });
@@ -379,7 +473,7 @@ export function useChats() {
           if (!chatMessages.some(message => message.id === msgId)) continue;
           next[chatId] = chatMessages.map(message =>
             message.id === msgId
-              ? { ...message, queued: false, failed: false, error: undefined }
+              ? { ...message, queued: false, transmitting: false, failed: false, status: 'transport_sent', error: undefined }
               : message
           );
           armDeliveryTimer(msgId, chatId);
@@ -395,7 +489,7 @@ export function useChats() {
           chatId,
           chatMessages.map(message =>
             message.id === msgId
-              ? { ...message, queued: false, failed: true, error: reason }
+              ? { ...message, queued: false, transmitting: false, failed: true, status: 'failed', error: reason }
               : message
           ),
         ]),
@@ -410,7 +504,50 @@ export function useChats() {
       deliveryTimersRef.current.forEach(clearTimeout);
       deliveryTimersRef.current.clear();
     };
-  }, [armDeliveryTimer]);
+  }, [armDeliveryTimer, ingestIncoming]);
+
+  const retryMessage = useCallback(async (chatId: string, message: Message) => {
+    const msgId = String(message.id);
+    setMessages(prev => ({
+      ...prev,
+      [chatId]: (prev[chatId] || []).map(item =>
+        item.id === message.id
+          ? { ...item, failed: false, queued: true, transmitting: false, status: 'queued', error: undefined }
+          : item
+      ),
+    }));
+    try {
+      if (msgId.startsWith('pending-')) {
+        await sendMessage(chatId, message.text);
+        return;
+      }
+      const status = await meshRetryMessage(msgId);
+      setMessages(prev => ({
+        ...prev,
+        [chatId]: (prev[chatId] || []).map(item =>
+          item.id === message.id
+            ? {
+                ...item,
+                queued: status === 'queued',
+                transmitting: status === 'transmitting',
+                failed: false,
+                status: status === 'transmitting' ? 'transmitting' : 'queued',
+              }
+            : item
+        ),
+      }));
+      if (status === 'transmitting') armDeliveryTimer(msgId, chatId);
+    } catch (error) {
+      setMessages(prev => ({
+        ...prev,
+        [chatId]: (prev[chatId] || []).map(item =>
+          item.id === message.id
+            ? { ...item, failed: true, queued: false, status: 'failed', error: String(error) }
+            : item
+        ),
+      }));
+    }
+  }, [armDeliveryTimer, sendMessage]);
 
   const clearAllData = useCallback(() => {
     setChats([]);
@@ -418,5 +555,5 @@ export function useChats() {
     chatsRef.current = [];
   }, []);
 
-  return { chats, messages, sendMessage, receiveMessage, startChat, markRead, clearAllData };
+  return { chats, messages, messagesForChat, sendMessage, receiveMessage, startChat, markRead, retryMessage, clearAllData };
 }

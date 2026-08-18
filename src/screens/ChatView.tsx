@@ -2,9 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import Avatar from '../components/Avatar';
 import ChatBubble from '../components/ChatBubble';
 import MessageInput from '../components/MessageInput';
-import type { ChatNode, Message } from '../types';
-import { Phone, Video, ChevronLeft, Shield, MoreVertical } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import type { ChatNode, Message, PeerLinkStatus } from '../types';
+import { isPeerOnline, peerLinkLabel } from '../peerLink';
+import { ChevronLeft, Shield, MoreVertical } from 'lucide-react';
 
 interface Props {
   chatId?: string;
@@ -14,7 +14,10 @@ interface Props {
   onBack: () => void;
   onSend?: (chatId: string, text: string) => void;
   onSendMessage?: (chatId: string, text: string) => void;
+  onRetry?: (chatId: string, message: Message) => void;
   onOpenSettings?: () => void;
+  peerOnline?: boolean;
+  peerLinkStatus?: PeerLinkStatus;
 }
 
 function formatTimestamp(date: Date | string): string {
@@ -31,17 +34,38 @@ const ChatView: React.FC<Props> = ({
   onBack,
   onSend,
   onSendMessage,
+  onRetry,
   onOpenSettings,
+  peerOnline,
+  peerLinkStatus,
 }) => {
+  const listRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
+
   const id = chatId || chat?.id || 'chat';
   const title = chatName || chat?.name || id;
   const msgList: Message[] = messages || chat?.messages || [];
 
+  const scrollToBottom = (smooth: boolean) => {
+    const list = listRef.current;
+    if (list) {
+      list.scrollTop = list.scrollHeight;
+      return;
+    }
+    messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
+  };
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [msgList.length]);
+    scrollToBottom(msgList.length > 1);
+  }, [msgList.length, msgList[msgList.length - 1]?.id]);
+
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    if (!viewport) return;
+    const onResize = () => scrollToBottom(false);
+    viewport.addEventListener('resize', onResize);
+    return () => viewport.removeEventListener('resize', onResize);
+  }, []);
 
   const handleSend = (text: string) => {
     if (onSend) onSend(id, text);
@@ -49,66 +73,56 @@ const ChatView: React.FC<Props> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background" data-testid="chat-view">
-      {/* Header */}
-      <div className="flex items-center gap-3 px-2 py-3 bg-background border-b border-border/10 sticky top-0 z-10 pt-safe h-16">
-        <button 
-          className="p-2 -ml-1 rounded-full text-accent hover:bg-secondary transition-colors md:hidden" 
-          onClick={onBack} 
+    <div className="flex-1 min-h-0 min-w-0 flex flex-col h-full overflow-hidden bg-background" data-testid="chat-view">
+      <div className="flex items-center gap-2 px-2 py-2 bg-background border-b border-border/10 shrink-0 pt-safe min-h-14">
+        <button
+          className="p-2 -ml-1 rounded-full text-accent hover:bg-secondary transition-colors md:hidden shrink-0"
+          onClick={onBack}
           aria-label="Wstecz"
         >
           <ChevronLeft size={28} strokeWidth={2.5} />
         </button>
-        <Avatar name={title} size={40} online={true} />
+        <Avatar name={title} size={40} online={isPeerOnline(peerLinkStatus, peerOnline)} />
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 ml-1">
           <span className="text-base font-bold text-foreground truncate">{title}</span>
-          <div className="flex items-center gap-1 mt-0.5">
-            <Shield size={10} className="text-emerald-500" />
-            <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">E2EE Mesh</span>
+          <div className="flex items-center gap-1 mt-0.5 min-w-0">
+            <Shield size={10} className={isPeerOnline(peerLinkStatus, peerOnline) ? 'text-emerald-500 shrink-0' : 'text-muted-foreground shrink-0'} />
+            <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">
+              {peerLinkLabel(peerLinkStatus, peerOnline)} · E2EE
+            </span>
           </div>
         </div>
-        <div className="flex items-center gap-1 mr-2">
-          <button className="p-2 rounded-full text-accent hover:bg-secondary transition-colors hidden sm:flex" aria-label="Połączenie głosowe">
-            <Phone size={22} />
+        {onOpenSettings && (
+          <button
+            className="p-2 rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors shrink-0"
+            aria-label="Ustawienia"
+            onClick={onOpenSettings}
+          >
+            <MoreVertical size={24} />
           </button>
-          <button className="p-2 rounded-full text-accent hover:bg-secondary transition-colors hidden sm:flex" aria-label="Połączenie wideo">
-            <Video size={24} />
-          </button>
-          {onOpenSettings && (
-            <button 
-              className="p-2 rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors ml-1"
-              aria-label="Ustawienia"
-              onClick={onOpenSettings}
-            >
-              <MoreVertical size={24} />
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 no-scrollbar">
+      <div
+        ref={listRef}
+        className="flex-1 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden px-3 py-3 no-scrollbar"
+      >
         {msgList.length === 0 && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="flex flex-col items-center justify-center h-full text-center opacity-50 space-y-3"
-          >
-             <Shield size={32} className="text-muted-foreground" />
-             <p className="text-xs text-muted-foreground">Wiadomości są szyfrowane E2EE<br/>i podpisywane kluczem tożsamości.</p>
-          </motion.div>
+          <div className="flex flex-col items-center justify-center h-full text-center opacity-50 space-y-3 px-6">
+            <Shield size={32} className="text-muted-foreground" />
+            <p className="text-xs text-muted-foreground">
+              Wiadomości są szyfrowane E2EE<br />i podpisywane kluczem tożsamości.
+            </p>
+          </div>
         )}
-        
-        <AnimatePresence initial={false}>
+
+        <div className="flex flex-col gap-3 w-full min-w-0">
           {msgList.map((msg, index) => {
             const isSent = msg.sent ?? false;
             return (
-              <motion.div
-                key={msg.id || index}
-                initial={{ opacity: 0, y: 20, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                layout
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              <div
+                key={msg.clientKey || msg.id || index}
+                className="w-full min-w-0"
                 data-testid={isSent ? 'msg-bubble-sent' : 'msg-bubble-received'}
               >
                 <ChatBubble
@@ -118,17 +132,18 @@ const ChatView: React.FC<Props> = ({
                   delivered={msg.delivered}
                   failed={msg.failed}
                   queued={msg.queued}
+                  transmitting={msg.transmitting || msg.status === 'transmitting'}
                   error={msg.error}
+                  onRetry={onRetry && isSent && msg.failed ? () => onRetry(id, msg) : undefined}
                 />
-              </motion.div>
+              </div>
             );
           })}
-        </AnimatePresence>
-        <div ref={messagesEndRef} />
+        </div>
+        <div ref={messagesEndRef} className="h-1 shrink-0" />
       </div>
 
-      {/* Input Bar */}
-      <div data-testid="chat-input-bar">
+      <div className="shrink-0 min-w-0" data-testid="chat-input-bar">
         <MessageInput onSend={handleSend} />
       </div>
     </div>
