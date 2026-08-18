@@ -12,12 +12,15 @@ import {
   meshFlushOutbox,
   onBlePeerConnected,
   onBlePeerDisconnected,
+  onBlePeerConnecting,
+  onPeerLink,
   onPeerLocationReceived,
   onBleError,
   setNodeName,
   type BlePeerDiscovered,
 } from '../api';
 import type { Peer, PeerDiscoveredPayload, PeerStatusPayload, PeerLocationPayload } from '../types';
+import { isPeerOnline, mergePeerLink } from '../peerLink';
 
 export function useMesh() {
   const [peers, setPeers] = useState<Peer[]>([]);
@@ -35,13 +38,15 @@ export function useMesh() {
         const existingIndex = prev.findIndex(
           p => p.id === payload.id || payload.id.endsWith(p.id) || p.id.endsWith(payload.id) || (p.address && payload.address && p.address === payload.address)
         );
+        const linkStatus = payload.linkStatus || (payload.online ? 'ready' : 'disconnected');
         if (existingIndex >= 0) {
           const updated = [...prev];
           updated[existingIndex] = {
             ...updated[existingIndex],
             id: payload.id,
             name: payload.name || updated[existingIndex].name,
-            online: payload.online,
+            linkStatus: mergePeerLink(updated[existingIndex].linkStatus, linkStatus),
+            online: isPeerOnline(mergePeerLink(updated[existingIndex].linkStatus, linkStatus), payload.online),
             ...(payload.rssi !== undefined ? { rssi: payload.rssi } : {}),
             ...(payload.address ? { address: payload.address } : {}),
           };
@@ -52,7 +57,8 @@ export function useMesh() {
             {
               id: payload.id,
               name: payload.name || payload.id.slice(0, 8),
-              online: payload.online,
+              linkStatus,
+              online: isPeerOnline(linkStatus, payload.online),
               ...(payload.rssi !== undefined ? { rssi: payload.rssi } : {}),
               ...(payload.address ? { address: payload.address } : {}),
             },
@@ -69,12 +75,14 @@ export function useMesh() {
         );
         if (existingIndex >= 0) {
           const updated = [...prev];
+          const nextStatus = mergePeerLink(updated[existingIndex].linkStatus, 'discovered');
           updated[existingIndex] = {
             ...updated[existingIndex],
             name: payload.name || updated[existingIndex].name,
             rssi: payload.rssi,
             address: payload.address,
-            online: true,
+            linkStatus: nextStatus,
+            online: isPeerOnline(nextStatus, false),
           };
           return updated;
         } else {
@@ -83,7 +91,8 @@ export function useMesh() {
             {
               id: payload.shortId,
               name: payload.name || payload.shortId,
-              online: true,
+              online: false,
+              linkStatus: 'discovered',
               rssi: payload.rssi,
               address: payload.address,
             },
@@ -94,13 +103,46 @@ export function useMesh() {
 
     const statusPromise = onPeerStatus((payload: PeerStatusPayload) => {
       setPeers(prev =>
-        prev.map(p => (p.id === payload.id ? { ...p, online: payload.online } : p))
+        prev.map(p => {
+          if (p.id !== payload.id) return p;
+          const linkStatus = payload.linkStatus || (payload.online ? 'ready' : 'disconnected');
+          return {
+            ...p,
+            linkStatus,
+            online: isPeerOnline(linkStatus, payload.online),
+          };
+        })
       );
+    });
+
+    const linkPromise = onPeerLink((payload) => {
+      if (!isMounted) return;
+      setPeers(prev => prev.map(peer => {
+        const matches = (payload.id && peer.id === payload.id) ||
+          (payload.address && peer.address === payload.address);
+        if (!matches) return peer;
+        const linkStatus = mergePeerLink(peer.linkStatus, payload.status);
+        return { ...peer, linkStatus, online: isPeerOnline(linkStatus, false) };
+      }));
+    });
+
+    const connectingPromise = onBlePeerConnecting((payload: { address: string }) => {
+      if (!isMounted) return;
+      setPeers(prev => prev.map(peer =>
+        peer.address === payload.address
+          ? { ...peer, linkStatus: mergePeerLink(peer.linkStatus, 'connecting'), online: false }
+          : peer
+      ));
     });
 
     const connectedAddressPromise = onBlePeerConnected((payload: { address: string }) => {
       if (!isMounted) return;
       setConnectedAddresses(prev => (prev.includes(payload.address) ? prev : [...prev, payload.address]));
+      setPeers(prev => prev.map(peer => {
+        if (peer.address !== payload.address) return peer;
+        if (peer.linkStatus === 'ready') return peer;
+        return { ...peer, linkStatus: 'connected', online: false };
+      }));
     });
 
     const disconnectedAddressPromise = onBlePeerDisconnected((payload: { address: string }) => {
@@ -108,7 +150,7 @@ export function useMesh() {
       setConnectedAddresses(prev => prev.filter(addr => addr !== payload.address));
       setPeers(prev => prev.map(peer =>
         peer.address === payload.address
-          ? { ...peer, online: false, lastSeen: new Date().toISOString() }
+          ? { ...peer, online: false, linkStatus: 'disconnected', lastSeen: new Date().toISOString() }
           : peer
       ));
     });
@@ -241,6 +283,8 @@ export function useMesh() {
       discoveredPromise.then(unlisten => unlisten && unlisten());
       bleDiscoveredPromise.then(unlisten => unlisten && unlisten());
       statusPromise.then(unlisten => unlisten && unlisten());
+      linkPromise.then(unlisten => unlisten && unlisten());
+      connectingPromise.then(unlisten => unlisten && unlisten());
       connectedAddressPromise.then(unlisten => unlisten && unlisten());
       disconnectedAddressPromise.then(unlisten => unlisten && unlisten());
       bleErrorPromise.then(unlisten => unlisten && unlisten());

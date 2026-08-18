@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Radio, MapPin, Zap } from 'lucide-react';
 import type { Peer } from '../types';
+import { peerLinkLabel } from '../peerLink';
 import Avatar from '../components/Avatar';
 import { getCurrentPosition, checkPermissions, requestPermissions } from '@tauri-apps/plugin-geolocation';
 import { meshSendLocation } from '../api';
@@ -115,7 +116,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
 
   // Widoczni ludzie posortowani po odległości
   const visiblePeers = peers
-    .filter(p => p.online)
+    .filter(p => p.linkStatus === 'discovered' || p.linkStatus === 'connecting' || p.linkStatus === 'connected' || p.linkStatus === 'ready')
     .map(p => {
       if (myLat !== null && myLon !== null && p.lat !== undefined && p.lon !== undefined) {
         return { ...p, distance: calculateDistance(myLat, myLon, p.lat, p.lon), method: 'gps' };
@@ -211,7 +212,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground truncate opacity-70">
-                      ID: {peer.id.slice(0, 8).toUpperCase()}
+                      {peerLinkLabel(peer.linkStatus, peer.online)} · ID: {peer.id.slice(0, 8).toUpperCase()}
                     </p>
                   </div>
                   {/^VX-[0-9A-F]{32}$/i.test(peer.id) && (
