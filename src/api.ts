@@ -54,6 +54,9 @@ export const checkForUpdates = async (): Promise<string | null> => {
 };
 export const installUpdate = (version: string): Promise<void> =>
   invoke('install_update', { version });
+export const onUpdateStatus = (
+  callback: (payload: { status: string; message: string }) => void,
+) => subscribe('update_status', callback);
 export const getPeers = (): Promise<Peer[]> => invoke<Peer[]>('get_peers');
 export const getNodeId = (): Promise<string> => invoke<string>('get_node_id');
 

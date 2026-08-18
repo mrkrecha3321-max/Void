@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import {
   checkForUpdates,
   installUpdate,
+  onUpdateStatus,
   onMessageReceived,
   onSosReceived,
   trustPeer,
@@ -159,13 +160,33 @@ function App() {
     checkVer();
   }, []);
 
+  useEffect(() => {
+    const subscription = onUpdateStatus((payload) => {
+      if (payload.status === 'installed') {
+        setIsUpdating(false);
+        setUpdateVersion(null);
+        return;
+      }
+      if (payload.status === 'failed' && payload.message) {
+        setIsUpdating(false);
+        window.alert(`Instalacja aktualizacji nie powiodła się: ${payload.message}`);
+      }
+    });
+    return () => {
+      subscription.then(unlisten => unlisten?.());
+    };
+  }, []);
+
   const handleUpdate = async () => {
     if (!updateVersion) return;
     setIsUpdating(true);
     try {
       await installUpdate(updateVersion);
+      window.alert(
+        'Aktualizacja została pobrana. Potwierdź instalację w oknie Androida. Jeśli system poprosi o zgodę na instalację z tej aplikacji, włącz ją i wróć do VOID — instalacja wznowi się sama.',
+      );
     } catch (err) {
-      alert(`Błąd podczas pobierania aktualizacji: ${String(err)}`);
+      window.alert(`Nie udało się zainstalować aktualizacji: ${String(err)}`);
     } finally {
       setIsUpdating(false);
     }
