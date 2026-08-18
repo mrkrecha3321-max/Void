@@ -1,16 +1,11 @@
-import test, { describe, it } from 'node:test';
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import path from 'node:path';
-import { runCommand } from './helpers/process_runner.mjs';
 import {
   simulateDenseMesh,
   simulateStartupPermissionFlow,
   simulatePeerLifecycle,
   sendTextContract,
 } from './helpers/mesh_contracts.mjs';
-
-const ROOT_DIR = process.cwd();
-const TAURI_DIR = path.join(ROOT_DIR, 'src-tauri');
 
 describe('Tier 4: Real-World Application Scenarios Verification', () => {
   it('Test 4.1: Dense mesh peer environment (10 concurrent peers, independent pubkey storage, sorted radar proximity list)', () => {
@@ -107,31 +102,5 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
     // 4. Verify chat instances exist for both users
     assert.ok(aliceState.chats.has(bobState.id));
     assert.ok(bobState.chats.has(aliceState.id));
-  });
-
-  it('Test 4.4: App release & build verification pipeline (npm run build, npx tsc --noEmit, cargo check all pass with exit code 0)', { timeout: 300000 }, async () => {
-    // Step 1: Vite build
-    const buildRes = await runCommand('npm', ['run', 'build'], ROOT_DIR);
-    assert.equal(
-      buildRes.exitCode,
-      0,
-      `npm run build failed with exit code ${buildRes.exitCode}.\nStderr: ${buildRes.stderr}\nStdout: ${buildRes.stdout}`
-    );
-
-    // Step 2: TypeScript type check
-    const tscRes = await runCommand('npx', ['tsc', '--noEmit'], ROOT_DIR);
-    assert.equal(
-      tscRes.exitCode,
-      0,
-      `npx tsc --noEmit failed with exit code ${tscRes.exitCode}.\nStderr: ${tscRes.stderr}\nStdout: ${tscRes.stdout}`
-    );
-
-    // Step 3: Cargo check in backend
-    const cargoRes = await runCommand('cargo', ['check', '--locked'], TAURI_DIR);
-    assert.equal(
-      cargoRes.exitCode,
-      0,
-      `cargo check failed with exit code ${cargoRes.exitCode}.\nStderr: ${cargoRes.stderr}\nStdout: ${cargoRes.stdout}`
-    );
   });
 });

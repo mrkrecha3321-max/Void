@@ -53,7 +53,9 @@ class MeshForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startInForeground()
-        BleManager.restoreIfNeeded(applicationContext)
+        // State restoration belongs to onCreate. Calling it for every start
+        // request used to recurse through startAdvertising/startScanning back
+        // into startForegroundService and starve the application's main thread.
         return START_STICKY
     }
 
