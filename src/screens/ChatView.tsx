@@ -34,13 +34,21 @@ const ChatView: React.FC<Props> = ({
   onOpenSettings,
 }) => {
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  
+  const listRef = useRef<HTMLDivElement>(null);
+
   const id = chatId || chat?.id || 'chat';
   const title = chatName || chat?.name || id;
   const msgList: Message[] = messages || chat?.messages || [];
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = messagesEndRef.current;
+    if (!el) return;
+    // Avoid hijacking the UI if the user scrolled up to read history.
+    const container = listRef.current;
+    const nearBottom = container
+      ? container.scrollHeight - container.scrollTop - container.clientHeight < 160
+      : true;
+    if (nearBottom) el.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [msgList.length]);
 
   const handleSend = (text: string) => {
@@ -49,25 +57,25 @@ const ChatView: React.FC<Props> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background" data-testid="chat-view">
+    <div className="flex-1 flex flex-col h-full min-w-0 bg-background" data-testid="chat-view">
       {/* Header */}
-      <div className="flex items-center gap-3 px-2 py-3 bg-background border-b border-border/10 sticky top-0 z-10 pt-safe h-16">
-        <button 
-          className="p-2 -ml-1 rounded-full text-accent hover:bg-secondary transition-colors md:hidden" 
-          onClick={onBack} 
+      <div className="flex items-center gap-2 px-2 sm:px-3 bg-background border-b border-border/10 shrink-0 pt-safe">
+        <button
+          className="p-2 -ml-1 rounded-full text-accent hover:bg-secondary transition-colors md:hidden"
+          onClick={onBack}
           aria-label="Wstecz"
         >
           <ChevronLeft size={28} strokeWidth={2.5} />
         </button>
         <Avatar name={title} size={40} online={true} />
-        <div className="flex-1 flex flex-col overflow-hidden min-w-0 ml-1">
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0 ml-1 py-2">
           <span className="text-base font-bold text-foreground truncate">{title}</span>
           <div className="flex items-center gap-1 mt-0.5">
             <Shield size={10} className="text-emerald-500" />
             <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">E2EE Mesh</span>
           </div>
         </div>
-        <div className="flex items-center gap-1 mr-2">
+        <div className="flex items-center gap-1 mr-1 sm:mr-2">
           <button className="p-2 rounded-full text-accent hover:bg-secondary transition-colors hidden sm:flex" aria-label="Połączenie głosowe">
             <Phone size={22} />
           </button>
@@ -75,60 +83,52 @@ const ChatView: React.FC<Props> = ({
             <Video size={24} />
           </button>
           {onOpenSettings && (
-            <button 
+            <button
               className="p-2 rounded-full text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors ml-1"
               aria-label="Ustawienia"
               onClick={onOpenSettings}
             >
-              <MoreVertical size={24} />
+              <MoreVertical size={22} />
             </button>
           )}
         </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-4 no-scrollbar">
+      <div ref={listRef} className="flex-1 overflow-y-auto px-3 sm:px-4 py-4 no-scrollbar flex flex-col">
         {msgList.length === 0 && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
-            className="flex flex-col items-center justify-center h-full text-center opacity-50 space-y-3"
+            className="m-auto flex flex-col items-center justify-center text-center opacity-60 space-y-3 py-10"
           >
-             <Shield size={32} className="text-muted-foreground" />
-             <p className="text-xs text-muted-foreground">Wiadomości są szyfrowane E2EE<br/>i podpisywane kluczem tożsamości.</p>
+            <Shield size={32} className="text-muted-foreground" />
+            <p className="text-xs text-muted-foreground max-w-[260px]">Wiadomości są szyfrowane E2EE<br />i podpisywane kluczem tożsamości.</p>
           </motion.div>
         )}
-        
+
         <AnimatePresence initial={false}>
           {msgList.map((msg, index) => {
             const isSent = msg.sent ?? false;
             return (
-              <motion.div
+              <ChatBubble
                 key={msg.id || index}
-                initial={{ opacity: 0, y: 20, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                layout
-                transition={{ type: "spring", stiffness: 300, damping: 25 }}
-                data-testid={isSent ? 'msg-bubble-sent' : 'msg-bubble-received'}
-              >
-                <ChatBubble
-                  text={msg.text}
-                  sent={isSent}
-                  timestamp={formatTimestamp(msg.timestamp)}
-                  delivered={msg.delivered}
-                  failed={msg.failed}
-                  queued={msg.queued}
-                  error={msg.error}
-                />
-              </motion.div>
+                text={msg.text}
+                sent={isSent}
+                timestamp={formatTimestamp(msg.timestamp)}
+                delivered={msg.delivered}
+                failed={msg.failed}
+                queued={msg.queued}
+                error={msg.error}
+              />
             );
           })}
         </AnimatePresence>
-        <div ref={messagesEndRef} />
+        <div ref={messagesEndRef} className="h-px w-full" />
       </div>
 
       {/* Input Bar */}
-      <div data-testid="chat-input-bar">
+      <div data-testid="chat-input-bar" className="shrink-0">
         <MessageInput onSend={handleSend} />
       </div>
     </div>

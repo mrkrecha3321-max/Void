@@ -1,10 +1,17 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import Avatar from '../components/Avatar';
 import type { Peer } from '../types';
-import { Users, UserPlus, RadioReceiver, Hash, X } from 'lucide-react';
+import { Users, UserPlus, Hash, X, QrCode, Camera, ScanLine, Settings } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { listen } from '@tauri-apps/api/event';
 import { importContactCard } from '../api';
+import {
+  scan,
+  cancel,
+  checkPermissions,
+  requestPermissions,
+  openAppSettings,
+  Format,
+} from '@tauri-apps/plugin-barcode-scanner';
 
 interface Props {
   peers: Peer[];
@@ -13,73 +20,87 @@ interface Props {
   myNodeId?: string | null;
 }
 
+type QrState = 'idle' | 'requesting' | 'scanning' | 'verified' | 'denied' | 'error';
+
 const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) => {
   const [copied, setCopied] = useState(false);
-  const [showNfcModal, setShowNfcModal] = useState(false);
+  const [showQrModal, setShowQrModal] = useState(false);
   const [showIdModal, setShowIdModal] = useState(false);
-  const [nfcStatus, setNfcStatus] = useState<string>('');
+  const [qrState, setQrState] = useState<QrState>('idle');
+  const [qrMessage, setQrMessage] = useState('');
   const [peerIdInput, setPeerIdInput] = useState('');
   const [peerNameInput, setPeerNameInput] = useState('');
-  const nfcUnlistenRef = useRef<(() => void) | null>(null);
-  const nfcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Listen for nfc_tag_read events from native NfcManager.kt when modal is open.
-  // Web NFC API (NDEFReader) does NOT work in Tauri WebView — we use Tauri events instead.
-  useEffect(() => {
-    if (!showNfcModal) {
-      if (nfcTimerRef.current) {
-        clearTimeout(nfcTimerRef.current);
-        nfcTimerRef.current = null;
-      }
-      if (nfcUnlistenRef.current) {
-        nfcUnlistenRef.current();
-        nfcUnlistenRef.current = null;
-      }
+  const isTauri = !!(window as any)['__TAURI_INTERNALS__'];
+
+  const startQrScan = async () => {
+    setQrState('requesting');
+    setQrMessage('Przygotowywanie aparatu...');
+
+    if (!isTauri) {
+      setQrState('error');
+      setQrMessage('Skaner QR działa tylko w aplikacji mobilnej Void (Android/iOS). Na komputerze dodaj kontakt ręcznie po Node ID.');
       return;
     }
 
-    setNfcStatus('Zbliż telefon do podpisanego tagu VOID2...');
-
-    // Native NFC → Rust JNI → validated protocol-v2 contact card.
-    listen<{ payload: string }>('nfc_tag_read', async (event) => {
-      try {
-        const raw: string =
-          (event.payload as any)?.payload ?? (event.payload as unknown as string);
-        if (typeof raw !== 'string' || !raw.startsWith('VOID2:')) {
-          setNfcStatus('Tag nie zawiera podpisanej wizytówki VOID2');
-          return;
-        }
-        const contact = await importContactCard(raw);
-        setNfcStatus(`✅ Zweryfikowano podpis: ${contact.name}`);
-        if (nfcTimerRef.current) clearTimeout(nfcTimerRef.current);
-        nfcTimerRef.current = setTimeout(() => {
-          setShowNfcModal(false);
-          onStartChat(contact.nodeId, contact.name);
-          nfcTimerRef.current = null;
-        }, 800);
-      } catch (error) {
-        setNfcStatus(`Odrzucono tag: ${String(error)}`);
+    try {
+      let permission = await checkPermissions();
+      if (permission !== 'granted') {
+        permission = await requestPermissions();
       }
-    }).then(unlisten => {
-      nfcUnlistenRef.current = unlisten;
-    }).catch(() => {
-      setNfcStatus('NFC niedostępne (tryb deweloperski)');
-    });
-
-    return () => {
-      if (nfcTimerRef.current) {
-        clearTimeout(nfcTimerRef.current);
-        nfcTimerRef.current = null;
+      if (permission !== 'granted') {
+        setQrState('denied');
+        setQrMessage('Aby zeskanować kod QR, zezwól aplikacji na dostęp do aparatu.');
+        return;
       }
-      if (nfcUnlistenRef.current) {
-        nfcUnlistenRef.current();
-        nfcUnlistenRef.current = null;
-      }
-    };
-  }, [showNfcModal, onAddPeer, onStartChat]);
 
-  const handleNfcScan = () => {
-    setShowNfcModal(true);
+      setQrState('scanning');
+      setQrMessage('Nakieruj aparat na kod QR profilu VOID2...');
+
+      const result = await scan({
+        cameraDirection: 'back',
+        formats: [Format.QRCode],
+        windowed: false,
+      });
+
+      const raw = result?.content ?? '';
+      if (!raw.startsWith('VOID2:')) {
+        setQrState('error');
+        setQrMessage('To nie jest podpisany kod QR profilu Void (oczekiwano VOID2:...).');
+        return;
+      }
+
+      setQrState('requesting');
+      setQrMessage('Weryfikowanie podpisu profilu...');
+      const contact = await importContactCard(raw);
+      setQrState('verified');
+      setQrMessage(`Zweryfikowano podpis: ${contact.name}`);
+
+      // Close the native scanner view, then open the verified chat after a beat.
+      cancel().catch(() => undefined);
+      setTimeout(() => {
+        setShowQrModal(false);
+        setQrState('idle');
+        onStartChat(contact.nodeId, contact.name);
+      }, 650);
+    } catch (error) {
+      // User cancelled / backed out of the scanner — not a real error.
+      const message = String(error ?? '');
+      if (/cancel|denied|rejected/i.test(message)) {
+        setShowQrModal(false);
+        setQrState('idle');
+        return;
+      }
+      setQrState('error');
+      setQrMessage(`Nie udało się zeskanować kodu: ${message}`);
+    }
+  };
+
+  const closeQrModal = () => {
+    if (qrState === 'scanning') cancel().catch(() => undefined);
+    setShowQrModal(false);
+    setQrState('idle');
+    setQrMessage('');
   };
 
   const handleAddById = async (e: React.FormEvent) => {
@@ -111,15 +132,23 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
             onClick={() => setShowIdModal(true)}
             className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors"
             title="Dodaj po ID"
+            aria-label="Dodaj kontakt po Node ID"
           >
             <Hash size={20} />
           </button>
           <button
-            onClick={handleNfcScan}
-            className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors"
-            title="Dodaj przez NFC"
+            onClick={() => {
+              setQrState('idle');
+              setQrMessage('');
+              setShowQrModal(true);
+              // Auto-start the scanner a tick later so the modal can render.
+              setTimeout(() => { void startQrScan(); }, 150);
+            }}
+            className="w-10 h-10 rounded-full bg-accent text-white flex items-center justify-center hover:bg-accent/90 active:scale-95 transition-all shadow-md shadow-accent/20"
+            title="Skanuj kod QR"
+            aria-label="Skanuj kod QR kontaktu"
           >
-            <UserPlus size={20} />
+            <QrCode size={20} />
           </button>
         </div>
       </div>
@@ -156,9 +185,9 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
           <div className="w-20 h-20 bg-secondary/50 rounded-full flex items-center justify-center mb-6">
             <Users size={36} className="text-muted-foreground opacity-50" />
           </div>
-          <h3 className="text-xl font-bold text-foreground mb-2">Brak peerów w sieci</h3>
+          <h3 className="text-xl font-bold text-foreground mb-2">Brak kontaktów</h3>
           <p className="text-muted-foreground text-sm">
-            Dodaj peera przez ID lub skaner NFC.
+            Dodaj kontakt, skanując jego kod QR (ikona aparatu)<br />albo wpisując Node ID ręcznie.
           </p>
         </motion.div>
       ) : (
@@ -209,6 +238,7 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               <button
                 onClick={() => setShowIdModal(false)}
                 className="absolute top-4 right-4 text-muted-foreground hover:text-foreground"
+                aria-label="Zamknij"
               >
                 <X size={24} />
               </button>
@@ -247,14 +277,14 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         )}
       </AnimatePresence>
 
-      {/* NFC Modal Overlay */}
+      {/* QR Scanner Modal */}
       <AnimatePresence>
-        {showNfcModal && (
+        {showQrModal && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 z-50 bg-background/80 backdrop-blur-sm flex items-center justify-center p-6"
+            className="absolute inset-0 z-50 bg-background/90 backdrop-blur-sm flex items-center justify-center p-6"
           >
             <motion.div
               initial={{ scale: 0.9, y: 20 }}
@@ -263,21 +293,64 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               className="bg-card w-full max-w-sm rounded-3xl p-6 shadow-2xl border border-border flex flex-col items-center text-center relative"
             >
               <button
-                onClick={() => setShowNfcModal(false)}
+                onClick={closeQrModal}
                 className="absolute top-4 right-4 text-muted-foreground hover:text-foreground"
+                aria-label="Zamknij skaner"
               >
                 <X size={24} />
               </button>
-              <div className="w-20 h-20 rounded-full bg-accent/20 flex items-center justify-center mb-6 mt-4">
-                <RadioReceiver size={40} className="text-accent animate-pulse" />
+
+              <div className="w-20 h-20 rounded-full bg-accent/15 flex items-center justify-center mb-5 mt-2">
+                {qrState === 'scanning' ? (
+                  <ScanLine size={40} className="text-accent animate-pulse" />
+                ) : qrState === 'denied' ? (
+                  <Settings size={38} className="text-amber-500" />
+                ) : qrState === 'verified' ? (
+                  <QrCode size={40} className="text-emerald-500" />
+                ) : (
+                  <Camera size={38} className="text-accent" />
+                )}
               </div>
-              <h2 className="text-xl font-bold mb-2">Dodawanie przez NFC</h2>
-              <p className="text-muted-foreground mb-6 text-sm leading-relaxed">
-                Zbliż telefon do przygotowanego tagu NFC z profilem VOID. Połączenie i klucz zostaną uwierzytelnione dopiero przez podpisany protokół BLE.
+
+              <h2 className="text-xl font-bold mb-2">
+                {qrState === 'verified' ? 'Profil zweryfikowany' : 'Skaner QR'}
+              </h2>
+
+              <p className="text-muted-foreground mb-5 text-sm leading-relaxed min-h-[3rem]">
+                {qrMessage || 'Zeskanuj podpisany kod QR profilu Void, aby dodać kontakt. Podpis jest weryfikowany w aplikacji.'}
               </p>
-              <div className="w-full bg-secondary/50 rounded-xl py-3 px-4 text-sm font-semibold text-accent min-h-[44px] flex items-center justify-center">
-                {nfcStatus || 'Czekam...'}
+
+              <div className="w-full flex flex-col gap-2">
+                {qrState === 'denied' && (
+                  <button
+                    onClick={() => { void openAppSettings().catch(() => undefined); }}
+                    className="w-full bg-accent text-white rounded-2xl py-3 font-bold active:scale-95 transition-transform"
+                  >
+                    Otwórz ustawienia aparatu
+                  </button>
+                )}
+
+                {(qrState === 'error' || qrState === 'denied') && isTauri && (
+                  <button
+                    onClick={() => { void startQrScan(); }}
+                    className="w-full bg-secondary text-foreground rounded-2xl py-3 font-semibold active:scale-95 transition-transform"
+                  >
+                    Spróbuj ponownie
+                  </button>
+                )}
+
+                <button
+                  onClick={closeQrModal}
+                  className="w-full text-muted-foreground rounded-2xl py-2.5 font-semibold hover:text-foreground transition-colors"
+                >
+                  Anuluj
+                </button>
               </div>
+
+              <p className="text-[11px] text-muted-foreground/70 mt-4 flex items-center gap-1">
+                <UserPlus size={12} />
+                Wolisz bez skanowania? Użyj ikony #, by dodać po Node ID.
+              </p>
             </motion.div>
           </motion.div>
         )}

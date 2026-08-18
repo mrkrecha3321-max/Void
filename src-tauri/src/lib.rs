@@ -396,9 +396,21 @@ fn ble_connect_to_peer(address: String) -> Result<bool, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The barcode scanner plugin's crate is `#![cfg(mobile)]` only, so it is
+    // linked and initialized exclusively on Android/iOS to keep the desktop
+    // build (and `cargo clippy` on Linux CI) compiling.
+    #[cfg(mobile)]
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_geolocation::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_barcode_scanner::init());
+
+    #[cfg(not(mobile))]
+    let builder = tauri::Builder::default()
+        .plugin(tauri_plugin_geolocation::init())
+        .plugin(tauri_plugin_notification::init());
+
+    let builder = builder
         .setup(move |app| {
             native_bridge::set_app_handle(app.handle().clone());
             let app_data_dir = app

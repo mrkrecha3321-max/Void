@@ -258,7 +258,12 @@ const MenuScreen: React.FC<Props> = ({
         <motion.div
           whileTap={{ scale: 0.98 }}
           className="flex items-center px-6 py-4 mx-4 mb-4 bg-red-500/10 border border-red-500/20 rounded-2xl cursor-pointer hover:bg-red-500/20 transition-colors"
-          onClick={() => setShowSos(true)}
+          onClick={() => {
+            // Prefill the caller name from the profile so the SOS button is not
+            // disabled when the user is under stress. They can still edit it.
+            if (!sosName.trim()) setSosName(profile.displayName || '');
+            setShowSos(true);
+          }}
         >
           <div className="w-12 h-12 rounded-full bg-red-500/20 text-red-500 flex items-center justify-center flex-shrink-0 animate-pulse">
             <AlertTriangle size={24} />
@@ -392,9 +397,9 @@ const MenuScreen: React.FC<Props> = ({
                 ) : (
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-4">
-                      <Avatar name={profile.displayName || "Vortex User"} avatarLetter={profile.avatarLetter} size={48} online={true} />
+                      <Avatar name={profile.displayName || "Użytkownik Void"} avatarLetter={profile.avatarLetter} size={48} online={true} />
                       <div className="flex flex-col">
-                        <span className="text-lg font-bold text-foreground">{profile.displayName || "Vortex User"}</span>
+                        <span className="text-lg font-bold text-foreground">{profile.displayName || "Użytkownik Void"}</span>
                         <span className="text-xs text-muted-foreground font-mono bg-secondary/50 px-1.5 py-0.5 rounded w-fit mt-0.5">ID: {nodeId || "Brak"}</span>
    <div className="flex items-center gap-2 mt-1.5">
      {connected ? (
@@ -593,78 +598,86 @@ const MenuScreen: React.FC<Props> = ({
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: "100%" }}
               transition={{ type: "spring", damping: 25, stiffness: 200 }}
-              className="relative w-full max-w-md bg-secondary/95 backdrop-blur-md rounded-t-3xl sm:rounded-3xl p-6 shadow-2xl border border-border/50 flex flex-col gap-5 sm:m-4 max-h-[90vh] overflow-y-auto no-scrollbar"
+              className="relative w-full max-w-md bg-secondary/95 backdrop-blur-md rounded-t-3xl sm:rounded-3xl shadow-2xl border border-border/50 flex flex-col sm:m-4 max-h-[92vh] overflow-hidden"
             >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-full bg-red-500 flex items-center justify-center shadow-lg shadow-red-500/30">
+              {/* Sticky header — always reachable */}
+              <div className="flex items-center justify-between p-5 pb-3 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-12 h-12 rounded-full bg-red-500 flex items-center justify-center shadow-lg shadow-red-500/30 shrink-0">
                     <AlertTriangle size={24} className="text-white" />
                   </div>
-                  <h2 className="text-2xl font-bold text-foreground">Sygnał SOS</h2>
+                  <h2 className="text-2xl font-bold text-foreground truncate">Sygnał SOS</h2>
                 </div>
                 <button 
-                  className="p-2 rounded-full bg-background/50 hover:bg-background text-muted-foreground hover:text-foreground transition-colors"
+                  className="p-2 rounded-full bg-background/50 hover:bg-background text-muted-foreground hover:text-foreground transition-colors shrink-0"
                   onClick={() => setShowSos(false)}
+                  aria-label="Zamknij"
                 >
                   <X size={20} />
                 </button>
               </div>
 
-              <div className="text-sm text-muted-foreground leading-relaxed">
-                Nadanie sygnału SOS wykorzysta maksymalną moc sieci Mesh (32 skoki), omijając filtry, by dotrzeć do wszystkich w promieniu kilku kilometrów. Używaj tylko w razie zagrożenia.
+              {/* Scrollable body */}
+              <div className="overflow-y-auto px-5 pb-2 no-scrollbar">
+                <div className="text-sm text-muted-foreground leading-relaxed mb-4">
+                  Nadanie sygnału SOS wykorzysta maksymalną moc sieci Mesh (32 skoki), omijając filtry, by dotrzeć do wszystkich w promieniu kilku kilometrów. Używaj tylko w razie zagrożenia.
+                </div>
+
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground ml-1">Twoje Imię / Identyfikator</label>
+                    <input 
+                      type="text" 
+                      value={sosName}
+                      onChange={(e) => setSosName(e.target.value.slice(0, 80))}
+                      maxLength={80}
+                      placeholder="np. Jan Kowalski"
+                      className="w-full bg-background border border-border/50 rounded-xl px-4 py-3 text-foreground outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
+                    />
+                  </div>
+                  
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground ml-1">Krótki opis sytuacji (max 200 znaków)</label>
+                    <textarea 
+                      value={sosDesc}
+                      onChange={(e) => setSosDesc(e.target.value.slice(0, 200))}
+                      placeholder="Co się dzieje? Jakiej pomocy potrzebujesz?"
+                      className="w-full bg-background border border-border/50 rounded-xl px-4 py-3 text-foreground outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all resize-none min-h-[96px]"
+                    />
+                    <div className="text-right text-xs text-muted-foreground">
+                      {sosDesc.length}/200
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 p-3 bg-background/50 rounded-xl border border-border/50">
+                    <div className="p-2 bg-accent/10 text-accent rounded-lg shrink-0">
+                      <MapPin size={20} />
+                    </div>
+                    <div className="flex flex-col">
+                      <span className="text-sm font-semibold text-foreground">Lokalizacja GPS</span>
+                      <span className="text-xs text-muted-foreground">Opcjonalna — SOS zadziała również bez GPS</span>
+                    </div>
+                  </div>
+                </div>
               </div>
 
-              <div className="flex flex-col gap-4 mt-2">
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground ml-1">Twoje Imię / Identyfikator</label>
-                  <input 
-                    type="text" 
-                    value={sosName}
-                    onChange={(e) => setSosName(e.target.value.slice(0, 80))}
-                    maxLength={80}
-                    placeholder="np. Jan Kowalski"
-                    className="w-full bg-background border border-border/50 rounded-xl px-4 py-3 text-foreground outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
-                  />
-                </div>
-                
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-bold uppercase tracking-wide text-muted-foreground ml-1">Krótki opis sytuacji (max 200 znaków)</label>
-                  <textarea 
-                    value={sosDesc}
-                    onChange={(e) => setSosDesc(e.target.value.slice(0, 200))}
-                    placeholder="Co się dzieje? Jakiej pomocy potrzebujesz?"
-                    className="w-full bg-background border border-border/50 rounded-xl px-4 py-3 text-foreground outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all resize-none min-h-[100px]"
-                  />
-                  <div className="text-right text-xs text-muted-foreground">
-                    {sosDesc.length}/200
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3 p-3 bg-background/50 rounded-xl border border-border/50">
-                  <div className="p-2 bg-accent/10 text-accent rounded-lg">
-                    <MapPin size={20} />
-                  </div>
-                  <div className="flex flex-col">
-                    <span className="text-sm font-semibold text-foreground">Lokalizacja GPS</span>
-                    <span className="text-xs text-muted-foreground">Opcjonalna — SOS zadziała również bez GPS</span>
-                  </div>
-                </div>
+              {/* Sticky footer — the SEND button is always visible on small phones */}
+              <div className="p-5 pt-3 shrink-0 border-t border-border/30 bg-secondary/80 backdrop-blur-md pb-safe">
+                <button
+                  className={`w-full py-4 rounded-xl flex items-center justify-center gap-2 font-bold text-white transition-all ${(!sosName.trim() || !sosDesc.trim() || sendingSos) ? 'bg-red-500/50 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25 active:scale-[0.98]'}`}
+                  onClick={handleSendSos}
+                  disabled={!sosName.trim() || !sosDesc.trim() || sendingSos}
+                >
+                  {sendingSos ? (
+                    <span className="animate-pulse">Nadawanie w toku...</span>
+                  ) : (
+                    <>
+                      <Send size={20} />
+                      NADAJ SOS W SIECI MESH
+                    </>
+                  )}
+                </button>
               </div>
-
-              <button
-                className={`mt-2 w-full py-4 rounded-xl flex items-center justify-center gap-2 font-bold text-white transition-all ${(!sosName.trim() || !sosDesc.trim() || sendingSos) ? 'bg-red-500/50 cursor-not-allowed' : 'bg-red-500 hover:bg-red-600 shadow-lg shadow-red-500/25 active:scale-[0.98]'}`}
-                onClick={handleSendSos}
-                disabled={!sosName.trim() || !sosDesc.trim() || sendingSos}
-              >
-                {sendingSos ? (
-                  <span className="animate-pulse">Nadawanie w toku...</span>
-                ) : (
-                  <>
-                    <Send size={20} />
-                    NADAJ SOS W SIECI MESH
-                  </>
-                )}
-              </button>
             </motion.div>
           </div>
         )}

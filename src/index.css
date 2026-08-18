@@ -1,22 +1,29 @@
 @import "tailwindcss";
 
+/* Enable class-based dark mode: Tailwind v4 no longer ships a default `dark`
+   variant. We map `dark:` utilities to a `.dark` class on an ancestor. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* LIGHT THEME DEFAULT */
   --color-background: #ffffff;
   --color-foreground: #09090b;
-  
+
   --color-primary: #18181b;
   --color-primary-foreground: #fafafa;
-  
+
   --color-secondary: #f4f4f5;
   --color-secondary-foreground: #18181b;
-  
+
+  --color-card: #ffffff;
+  --color-card-foreground: #09090b;
+
   --color-accent: #2563eb;
   --color-accent-foreground: #ffffff;
-  
+
   --color-muted: #f4f4f5;
   --color-muted-foreground: #71717a;
-  
+
   --color-border: #e4e4e7;
 }
 
@@ -24,20 +31,29 @@
 [data-theme="dark"] {
   --color-background: #09090b;
   --color-foreground: #fafafa;
-  
+
   --color-primary: #fafafa;
   --color-primary-foreground: #18181b;
-  
+
   --color-secondary: #27272a;
   --color-secondary-foreground: #fafafa;
-  
+
+  --color-card: #18181b;
+  --color-card-foreground: #fafafa;
+
   --color-accent: #3b82f6;
   --color-accent-foreground: #ffffff;
-  
+
   --color-muted: #27272a;
   --color-muted-foreground: #a1a1aa;
-  
+
   --color-border: #27272a;
+}
+
+html,
+body,
+#root {
+  height: 100%;
 }
 
 body {
@@ -46,6 +62,12 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Prevent layout shifts / oversized UI when a phone uses large font scaling
+     (root cause of the "icons are huge and my messages are hidden" bug on
+     some Samsung devices). Components still respect readable sizes. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overscroll-behavior: none;
 }
 
 .no-scrollbar::-webkit-scrollbar {
@@ -56,12 +78,26 @@ body {
   scrollbar-width: none;
 }
 
-/* Tailwind base safe areas */
+/* Safe area helpers (notches / gesture / on-screen keyboards). The WebView is
+   edge-to-edge, so every full-bleed surface that touches a screen edge must
+   opt into these. */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+}
 @supports (padding-bottom: env(safe-area-inset-bottom)) {
   .pb-safe {
     padding-bottom: env(safe-area-inset-bottom);
   }
-  .pt-safe {
-    padding-top: env(safe-area-inset-top);
+}
+@supports (min-height: 100dvh) {
+  .h-screen-safe {
+    height: 100dvh;
   }
+}
+
+/* Emoji picker grid helper */
+.emoji-grid {
+  scrollbar-width: thin;
 }

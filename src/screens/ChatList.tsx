@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Edit, Shield } from 'lucide-react';
+import { Shield } from 'lucide-react';
 import SearchBar from '../components/SearchBar';
 import ChatListItem from '../components/ChatListItem';
 import type { Chat } from '../types';
@@ -22,9 +22,7 @@ const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 pt-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Void</h1>
-        <button className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors">
-          <Edit size={20} />
-        </button>
+        <div className="w-10 h-10" />
       </div>
 
       <div className="flex justify-center px-4 pb-2">

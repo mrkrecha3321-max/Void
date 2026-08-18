@@ -226,7 +226,7 @@ function App() {
 
   return (
     <div
-      className={`flex flex-col h-screen w-full relative overflow-hidden bg-background text-foreground ${theme === "dark" ? "dark" : ""}`}
+      className={`flex flex-col h-screen h-screen-safe w-full relative overflow-hidden bg-background text-foreground ${theme === "dark" ? "dark" : ""}`}
     >
       {updateVersion && (
         <div className="bg-blue-600 text-white px-4 py-3 flex justify-between items-center z-[110] text-sm font-medium border-b border-black/10">

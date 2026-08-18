@@ -171,7 +171,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
               </>
             )}
 
-            <div className="w-16 h-16 bg-accent rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(var(--accent),0.5)] z-10">
+            <div className="w-16 h-16 bg-accent rounded-full flex items-center justify-center shadow-[0_0_30px_rgba(37,99,235,0.5)] dark:shadow-[0_0_30px_rgba(59,130,246,0.55)] z-10">
               <Zap size={32} className="text-accent-foreground" />
             </div>
           </div>
