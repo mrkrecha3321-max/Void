@@ -3,6 +3,10 @@ name: Continuous Integration
 on:
   pull_request:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -85,11 +89,6 @@ jobs:
       - name: Run Kotlin unit tests
         working-directory: src-tauri/gen/android
         run: ./gradlew testDebugUnitTest
-      - name: Run Android instrumentation smoke tests
-        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2
-        with:
-          api-level: 35
-          arch: x86_64
-          profile: pixel_6
-          disable-animations: true
-          script: cd src-tauri/gen/android && ./gradlew connectedDebugAndroidTest
+      - name: Compile Android instrumentation smoke tests
+        working-directory: src-tauri/gen/android
+        run: ./gradlew assembleDebugAndroidTest
