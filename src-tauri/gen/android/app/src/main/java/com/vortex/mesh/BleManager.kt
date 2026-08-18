@@ -15,19 +15,39 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * BLE transport for VOID mesh.
+ *
+ * Reliability contract:
+ *  - every outbound [sendMessage] is associated with the full mesh message id
+ *    (UUID) and the (address, linkMessageId) reassembly key;
+ *  - the per-address write queue is drained one frame at a time and the next
+ *    frame is only sent after the GATT callback for the previous one;
+ *  - [NativeBridge.onTransportSent] fires after the LAST frame is written, not
+ *    when the frames are enqueued;
+ *  - a frame error/timeout/disconnect triggers retries of the whole message
+ *    up to [MAX_WRITE_ATTEMPTS], then [NativeBridge.onTransportFailed];
+ *  - the chunk size is derived from the negotiated MTU (ATT 3B + framing 5B),
+ *    negotiated via requestMtu(517) and clamped to [BleFrameCodec.MAX_MTU].
+ *
+ * Long-running scanning/advertising after the UI leaves the foreground is the
+ * job of [BleForegroundService]; Android 12+ background-scan limits are not
+ * bypassed — when the system stops scans the service restarts them on resume.
+ */
 object BleManager {
     val SERVICE_UUID: UUID = UUID.fromString("5f9b34fb-9b4a-4a0c-8b48-4b0e3c1b6b01")
     val MESSAGE_CHAR_UUID: UUID = UUID.fromString("5f9b34fb-9b4a-4a0c-8b48-4b0e3c1b6b02")
     private val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
-    private const val CHUNK_SIZE = BleFrameCodec.CHUNK_SIZE
-    private const val FRAME_HEADER_SIZE = BleFrameCodec.HEADER_SIZE
-    private const val MAX_MESSAGE_BYTES = BleFrameCodec.MAX_MESSAGE_BYTES
     private const val MAX_RX_BUFFERS = 128
     private const val MAX_RX_BUFFERS_PER_DEVICE = 16
     private const val RX_BUFFER_TIMEOUT_MS = 30_000L
     private const val CLEANUP_INTERVAL_MS = 10_000L
     private const val MAX_WRITE_ATTEMPTS = 3
+    private const val FRAME_WRITE_TIMEOUT_MS = 8_000L
+    private const val GATT_CONNECT_TIMEOUT_MS = 20_000L
+    private const val RECONNECT_DELAY_MS = 4_000L
+    private const val MAX_RECONNECT_ATTEMPTS = 6
 
     private var appContext: Context? = null
     private var bluetoothManager: BluetoothManager? = null
@@ -42,6 +62,9 @@ object BleManager {
     private val serverConnectedDevices = ConcurrentHashMap<String, BluetoothDevice>()
     private val peerShortIds = ConcurrentHashMap<String, String>()
 
+    /** Per-link negotiated MTU. Defaults to 23 (BLE minimum) until onMtuChanged. */
+    private val negotiatedMtu = ConcurrentHashMap<String, Int>()
+
     private data class ChunkKey(val address: String, val msgId: Int)
     private class ChunkBuffer(val totalChunks: Int) {
         val chunks = mutableMapOf<Int, ByteArray>()
@@ -49,16 +72,26 @@ object BleManager {
     }
     private val rxBuffers = ConcurrentHashMap<ChunkKey, ChunkBuffer>()
 
-    private data class PendingFrame(val bytes: ByteArray, var attempts: Int = 0)
-    private val writeQueues = ConcurrentHashMap<String, ArrayDeque<PendingFrame>>()
-    private val writesInFlight = ConcurrentHashMap.newKeySet<String>()
-    private val writeTimeouts = ConcurrentHashMap<String, Runnable>()
+    /** One full outbound mesh message queued to a GATT address. */
+    private class TxMessage(
+        val meshMsgId: String,
+        val frames: List<ByteArray>,
+        var frameIndex: Int = 0,
+        var attempts: Int = 0,
+        var completed: Boolean = false
+    )
 
-    private val nextMessageId = AtomicInteger(0)
+    private val txQueues = ConcurrentHashMap<String, ArrayDeque<TxMessage>>()
+    private val txInFlight = ConcurrentHashMap.newKeySet<String>()
+    private val frameTimeouts = ConcurrentHashMap<String, Runnable>()
+    private val connectTimeouts = ConcurrentHashMap<String, Runnable>()
+    private val reconnectAttempts = ConcurrentHashMap<String, Int>()
+
+    private val nextLinkMessageId = AtomicInteger(0)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val cleanupRunnable = object : Runnable {
         override fun run() {
-            cleanupStaleBuffers()
+            cleanupStaleState()
             mainHandler.postDelayed(this, CLEANUP_INTERVAL_MS)
         }
     }
@@ -78,13 +111,13 @@ object BleManager {
         mainHandler.post(cleanupRunnable)
     }
 
-    private fun cleanupStaleBuffers() {
+    private fun cleanupStaleState() {
         val cutoff = System.currentTimeMillis() - RX_BUFFER_TIMEOUT_MS
         rxBuffers.entries.removeIf { it.value.lastUpdate < cutoff }
     }
 
-    private fun allocateMessageId(): Int =
-        nextMessageId.getAndUpdate { (it + 1) and 0xFFFF } and 0xFFFF
+    private fun allocateLinkMessageId(): Int =
+        nextLinkMessageId.getAndUpdate { (it + 1) and 0xFFFF } and 0xFFFF
 
     private fun hasPermission(ctx: Context, permission: String): Boolean =
         ContextCompat.checkSelfPermission(ctx, permission) == PackageManager.PERMISSION_GRANTED
@@ -122,11 +155,8 @@ object BleManager {
         if (!canBle(ctx)) return
 
         if (hiddenChanged) {
-            if (hidden) {
-                stopAdvertisingInternal()
-            } else if (advertisingRequested) {
-                startAdvertising(ctx)
-            }
+            if (hidden) stopAdvertisingInternal()
+            else if (advertisingRequested) startAdvertising(ctx)
         }
         if (batteryChanged && scanningRequested) {
             stopScanningInternal()
@@ -137,7 +167,6 @@ object BleManager {
     @JvmStatic
     private fun handleReceivedBytes(address: String, bytes: ByteArray) {
         try {
-            // Protocol v2 accepts framed traffic only.
             val frame = BleFrameCodec.decode(bytes) ?: return
             val key = ChunkKey(address, frame.messageId)
             if (!rxBuffers.containsKey(key)) {
@@ -145,11 +174,11 @@ object BleManager {
                 if (rxBuffers.keys.count { it.address == address } >= MAX_RX_BUFFERS_PER_DEVICE) return
             }
             val buffer = rxBuffers.compute(key) { _, existing ->
-                if (existing == null || existing.totalChunks != frame.totalChunks) {
-                    ChunkBuffer(frame.totalChunks)
-                } else existing
+                if (existing == null || existing.totalChunks != frame.totalChunks) ChunkBuffer(frame.totalChunks)
+                else existing
             } ?: return
 
+            var completedMessage: ByteArray? = null
             synchronized(buffer) {
                 buffer.chunks[frame.chunkIndex] = frame.payload
                 buffer.lastUpdate = System.currentTimeMillis()
@@ -161,10 +190,12 @@ object BleManager {
                         output.write(buffer.chunks[index] ?: return)
                     }
                     rxBuffers.remove(key, buffer)
-                    val message = output.toByteArray()
-                    if (message.size <= MAX_MESSAGE_BYTES) {
-                        NativeBridge.onMessageReceived(address, String(message, Charsets.UTF_8))
-                    }
+                    completedMessage = output.toByteArray()
+                }
+            }
+            completedMessage?.let { message ->
+                if (message.size <= BleFrameCodec.maxMessageBytes(BleFrameCodec.MAX_MTU)) {
+                    NativeBridge.onMessageReceived(address, String(message, Charsets.UTF_8))
                 }
             }
         } catch (error: Throwable) {
@@ -189,7 +220,10 @@ object BleManager {
 
             try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Throwable) {}
             val settings = AdvertiseSettings.Builder()
-                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setAdvertiseMode(
+                    if (batterySaveMode) AdvertiseSettings.ADVERTISE_MODE_BALANCED
+                    else AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY
+                )
                 .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
                 .setConnectable(true)
                 .build()
@@ -220,9 +254,9 @@ object BleManager {
 
     private fun stopAdvertisingInternal() {
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Throwable) {}
-        try { gattServer?.close() } catch (_: Throwable) {}
-        gattServer = null
-        serverConnectedDevices.clear()
+        // Do not tear down gattServer here — an active connection may still be
+        // using it as the GATT client peer. It is closed only when all peers
+        // disconnect in clearAddressState.
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -236,14 +270,19 @@ object BleManager {
             try {
                 if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     serverConnectedDevices[device.address] = device
+                    negotiatedMtu[device.address] = BleFrameCodec.DEFAULT_MTU
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     serverConnectedDevices.remove(device.address)
-                    clearAddressState(device.address)
-                    NativeBridge.onPeerDisconnected(device.address)
+                    handleDisconnect(device.address)
                 }
             } catch (error: Throwable) {
                 reportError("GATT server state callback failed", error)
             }
+        }
+
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            // Server-side MTU for notifications.
+            negotiatedMtu[device.address] = mtu.coerceIn(BleFrameCodec.DEFAULT_MTU, BleFrameCodec.MAX_MTU)
         }
 
         override fun onCharacteristicWriteRequest(
@@ -260,7 +299,8 @@ object BleManager {
                 responseStatus = when {
                     characteristic.uuid != MESSAGE_CHAR_UUID || preparedWrite -> BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED
                     offset != 0 -> BluetoothGatt.GATT_INVALID_OFFSET
-                    value.size !in (FRAME_HEADER_SIZE..(FRAME_HEADER_SIZE + CHUNK_SIZE)) -> BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH
+                    value.size > BleFrameCodec.HEADER_SIZE + BleFrameCodec.maxPayloadForMtu(BleFrameCodec.MAX_MTU) ->
+                        BluetoothGatt.GATT_INVALID_ATTRIBUTE_LENGTH
                     else -> {
                         handleReceivedBytes(device.address, value)
                         BluetoothGatt.GATT_SUCCESS
@@ -290,11 +330,9 @@ object BleManager {
             if (responseNeeded) {
                 try {
                     gattServer?.sendResponse(
-                        device,
-                        requestId,
+                        device, requestId,
                         if (valid) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED,
-                        0,
-                        null
+                        0, null
                     )
                 } catch (_: Throwable) {}
             }
@@ -306,14 +344,14 @@ object BleManager {
         }
 
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
-            completeWrite(device.address, status == BluetoothGatt.GATT_SUCCESS)
+            completeFrame(device.address, status == BluetoothGatt.GATT_SUCCESS)
         }
     }
 
     private fun startGattServer(ctx: Context) {
         try {
             if (!canBle(ctx)) return
-            try { gattServer?.close() } catch (_: Throwable) {}
+            if (gattServer != null) return
             gattServer = bluetoothManager?.openGattServer(ctx, gattServerCallback)
             val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
             val messageCharacteristic = BluetoothGattCharacteristic(
@@ -369,9 +407,7 @@ object BleManager {
     }
 
     private fun stopScanningInternal() {
-        try {
-            scanner?.stopScan(scanCallback)
-        } catch (error: Throwable) {
+        try { scanner?.stopScan(scanCallback) } catch (error: Throwable) {
             reportError("Stopping BLE scan failed", error)
         }
     }
@@ -385,9 +421,8 @@ object BleManager {
                 val shortId = String(data, Charsets.US_ASCII).uppercase()
                 if (shortId.length != 8 || !shortId.all { it in '0'..'9' || it in 'A'..'F' }) return
 
-                // Do not disconnect an existing device solely because another
-                // advertiser claims the same short ID. Authentication happens
-                // later in the signed protocol-v2 presence envelope.
+                // Discovered is NOT connected. Authentication/handshake happens
+                // in the signed presence exchange after GATT connects.
                 peerShortIds.putIfAbsent(shortId, address)
                 discoveredDevices[address] = device
                 NativeBridge.onPeerDiscovered(address, shortId, "Kontakt ($shortId)", result.rssi)
@@ -418,40 +453,76 @@ object BleManager {
         return try {
             appContext = ctx.applicationContext
             if (!canBle(ctx)) return false
-            if (connectedGatts.containsKey(deviceAddress) || serverConnectedDevices.containsKey(deviceAddress)) return true
+            if (connectedGatts.containsKey(deviceAddress) ||
+                serverConnectedDevices.containsKey(deviceAddress)) return true
             if (!connectingAddresses.add(deviceAddress)) return true
             val currentAdapter = adapter ?: bluetoothManager?.adapter ?: run {
                 connectingAddresses.remove(deviceAddress)
                 return false
             }
             val device = discoveredDevices[deviceAddress] ?: currentAdapter.getRemoteDevice(deviceAddress)
-            val gatt = device.connectGatt(ctx, false, gattCallback)
+            val gatt = device.connectGatt(ctx, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
             if (gatt == null) {
                 connectingAddresses.remove(deviceAddress)
+                scheduleReconnect(ctx, deviceAddress)
                 false
             } else {
+                armConnectTimeout(ctx, deviceAddress)
                 true
             }
         } catch (error: Throwable) {
             connectingAddresses.remove(deviceAddress)
             reportError("GATT connect failed", error)
+            scheduleReconnect(ctx, deviceAddress)
             false
         }
+    }
+
+    private fun armConnectTimeout(ctx: Context, address: String) {
+        connectTimeouts.remove(address)?.let { mainHandler.removeCallbacks(it) }
+        val timeout = Runnable {
+            if (connectingAddresses.remove(address)) {
+                safeBleError("GATT connect timed out for $address")
+                closeGattFor(address)
+                scheduleReconnect(ctx, address)
+            }
+        }
+        connectTimeouts[address] = timeout
+        mainHandler.postDelayed(timeout, GATT_CONNECT_TIMEOUT_MS)
+    }
+
+    private fun scheduleReconnect(ctx: Context, address: String) {
+        if (!scanningRequested && !advertisingRequested) return
+        val attempts = reconnectAttempts.merge(address, 1) { a, _ -> a + 1 } ?: 1
+        if (attempts > MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts.remove(address)
+            return
+        }
+        val delay = RECONNECT_DELAY_MS * (1L shl (attempts - 1).coerceAtMost(4))
+        mainHandler.postDelayed({
+            try { connectToPeer(ctx, address) } catch (_: Throwable) {}
+        }, delay)
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             val address = gatt.device.address
             try {
+                connectTimeouts.remove(address)?.let { mainHandler.removeCallbacks(it) }
                 connectingAddresses.remove(address)
                 if (status == BluetoothGatt.GATT_SUCCESS && newState == BluetoothProfile.STATE_CONNECTED) {
                     connectedGatts[address] = gatt
-                    if (!gatt.requestMtu(512)) gatt.discoverServices()
+                    negotiatedMtu[address] = BleFrameCodec.DEFAULT_MTU
+                    reconnectAttempts.remove(address)
+                    // Request a larger MTU; onMtuChanged then discovers services.
+                    if (!gatt.requestMtu(BleFrameCodec.MAX_MTU)) {
+                        gatt.discoverServices()
+                    }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     connectedGatts.remove(address, gatt)
-                    clearAddressState(address)
-                    NativeBridge.onPeerDisconnected(address)
+                    handleDisconnect(address)
                     try { gatt.close() } catch (_: Throwable) {}
+                    appContext?.let { scheduleReconnect(it, address) }
                 }
             } catch (error: Throwable) {
                 connectingAddresses.remove(address)
@@ -459,7 +530,10 @@ object BleManager {
             }
         }
 
+        @Deprecated("Used in deprecated flow below; kept for older devices")
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            val safeMtu = mtu.coerceIn(BleFrameCodec.DEFAULT_MTU, BleFrameCodec.MAX_MTU)
+            negotiatedMtu[gatt.device.address] = safeMtu
             try { gatt.discoverServices() } catch (error: Throwable) {
                 reportError("GATT service discovery start failed", error)
             }
@@ -469,7 +543,7 @@ object BleManager {
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 enableNotifications(gatt)
             } else {
-                safeBleError("Service discovery failed: $status")
+                safeBleError("Service discovery failed: $status for ${gatt.device.address}")
             }
         }
 
@@ -479,7 +553,7 @@ object BleManager {
                     reportError("Peer connected callback failed", error)
                 }
             } else if (descriptor.uuid == CCCD_UUID) {
-                safeBleError("CCCD write failed: $status")
+                safeBleError("CCCD write failed: $status for ${gatt.device.address}")
             }
         }
 
@@ -489,7 +563,7 @@ object BleManager {
             status: Int
         ) {
             if (characteristic.uuid == MESSAGE_CHAR_UUID) {
-                completeWrite(gatt.device.address, status == BluetoothGatt.GATT_SUCCESS)
+                completeFrame(gatt.device.address, status == BluetoothGatt.GATT_SUCCESS)
             }
         }
 
@@ -501,35 +575,66 @@ object BleManager {
         }
     }
 
+    /**
+     * Queue a signed mesh envelope. [meshMsgId] is the full mesh UUID; the
+     * 16-bit BLE link id is allocated here and only meaningful for the lifetime
+     * of this transfer.
+     */
     @JvmStatic
-    fun sendMessage(ctx: Context, deviceAddress: String, text: String): Boolean {
+    fun sendMessage(ctx: Context, deviceAddress: String, text: String): Boolean =
+        sendMessage(ctx, deviceAddress, text, null)
+
+    @JvmStatic
+    fun sendMessage(ctx: Context, deviceAddress: String, text: String, meshMsgId: String?): Boolean {
         return try {
             appContext = ctx.applicationContext
             if (!canBle(ctx)) return false
             val bytes = text.toByteArray(Charsets.UTF_8)
-            if (bytes.isEmpty() || bytes.size > MAX_MESSAGE_BYTES) return false
-            if (!serverConnectedDevices.containsKey(deviceAddress) && !connectedGatts.containsKey(deviceAddress)) {
+            if (bytes.isEmpty()) return false
+            val mtu = negotiatedMtu[deviceAddress] ?: BleFrameCodec.DEFAULT_MTU
+            if (bytes.size > BleFrameCodec.maxMessageBytes(mtu)) return false
+
+            val hasRoute = serverConnectedDevices.containsKey(deviceAddress) ||
+                connectedGatts.containsKey(deviceAddress)
+            if (!hasRoute) {
+                // No GATT yet — try to connect; caller (Rust outbox) will retry
+                // once onPeerConnected fires flush_outbox. Report failure for
+                // THIS attempt so the outbox backoff (not a crash) handles it.
                 connectToPeer(ctx, deviceAddress)
+                if (meshMsgId != null) {
+                    NativeBridge.onTransportFailed(meshMsgId, "Brak trasy GATT; laczenie")
+                }
                 return false
             }
 
-            val encodedFrames = BleFrameCodec.encode(bytes, allocateMessageId())
+            val linkId = allocateLinkMessageId()
+            val encodedFrames = BleFrameCodec.encode(bytes, linkId, mtu)
             if (encodedFrames.isEmpty()) return false
-            val frames = encodedFrames.mapTo(ArrayList(encodedFrames.size)) { frame ->
-                PendingFrame(frame)
-            }
 
-            val queue = writeQueues.computeIfAbsent(deviceAddress) { ArrayDeque() }
+            val message = TxMessage(
+                meshMsgId = meshMsgId ?: linkId.toString(16),
+                frames = encodedFrames
+            )
+            val queue = txQueues.computeIfAbsent(deviceAddress) { ArrayDeque() }
             synchronized(queue) {
-                // Backpressure protects RAM when a slow GATT link receives a
-                // burst of relayed packets.
-                if (queue.size + frames.size > 2_048) return false
-                frames.forEach { frame -> queue.addLast(frame) }
+                // Backpressure: cap queued frames per link to protect RAM from a
+                // relay flood. Newer traffic is refused (Rust outbox retries).
+                val queuedFrames = queue.sumOf { it.frames.size - it.frameIndex }
+                if (queuedFrames + encodedFrames.size > 2_048) {
+                    if (meshMsgId != null) {
+                        NativeBridge.onTransportFailed(meshMsgId, "Kolejka BLE przeladowana")
+                    }
+                    return false
+                }
+                queue.addLast(message)
             }
-            mainHandler.post { drainWriteQueue(deviceAddress) }
+            drainWriteQueue(deviceAddress)
             true
         } catch (error: Throwable) {
             reportError("Queueing BLE message failed", error)
+            if (meshMsgId != null) {
+                NativeBridge.onTransportFailed(meshMsgId, "Blad kolejkowania BLE")
+            }
             false
         }
     }
@@ -539,60 +644,88 @@ object BleManager {
             mainHandler.post { drainWriteQueue(address) }
             return
         }
-        if (!writesInFlight.add(address)) return
-        val queue = writeQueues[address]
-        val pending = queue?.let { synchronized(it) { it.peekFirst() } }
-        if (pending == null) {
-            writesInFlight.remove(address)
-            if (queue != null) writeQueues.remove(address, queue)
+        if (!txInFlight.add(address)) return
+        val queue = txQueues[address]
+        val message = queue?.let {
+            synchronized(it) {
+                val current = it.peekFirst() ?: return@synchronized null
+                if (current.frameIndex >= current.frames.size) {
+                    it.pollFirst()
+                    return@synchronized it.peekFirst()
+                }
+                current
+            }
+        }
+        if (message == null || queue == null) {
+            txInFlight.remove(address)
+            if (queue != null) txQueues.remove(address, queue)
             return
         }
 
-        val started = serverConnectedDevices[address]?.let { startServerNotification(it, pending.bytes) }
-            ?: connectedGatts[address]?.let { startClientWrite(it, pending.bytes) }
+        val frame = message.frames[message.frameIndex]
+        val started = serverConnectedDevices[address]?.let { startServerNotification(it, frame) }
+            ?: connectedGatts[address]?.let { startClientWrite(it, frame) }
             ?: false
         if (started) {
             val timeout = Runnable {
-                if (writesInFlight.remove(address)) {
-                    writeQueues.remove(address)
-                    writeTimeouts.remove(address)
-                    safeBleError("BLE write timed out for $address")
+                if (txInFlight.remove(address)) {
+                    safeBleError("BLE frame write timed out for $address")
+                    completeFrame(address, false)
                 }
             }
-            writeTimeouts.put(address, timeout)?.let { callback -> mainHandler.removeCallbacks(callback) }
-            mainHandler.postDelayed(timeout, 5_000L)
+            frameTimeouts.put(address, timeout)?.let { mainHandler.removeCallbacks(it) }
+            mainHandler.postDelayed(timeout, FRAME_WRITE_TIMEOUT_MS)
         } else {
-            completeWrite(address, false)
+            completeFrame(address, false)
         }
     }
 
-    private fun completeWrite(address: String, success: Boolean) {
+    private fun completeFrame(address: String, success: Boolean) {
         mainHandler.post {
-            writeTimeouts.remove(address)?.let { callback -> mainHandler.removeCallbacks(callback) }
-            val queue = writeQueues[address]
-            val pending = queue?.let { synchronized(it) { it.peekFirst() } }
-            var retry = false
-            if (queue != null && pending != null) {
+            frameTimeouts.remove(address)?.let { mainHandler.removeCallbacks(it) }
+            val queue = txQueues[address]
+            var messageFinished = false
+            var finishedMsgId: String? = null
+            var failedMsgId: String? = null
+            var shouldRetry = false
+
+            if (queue != null) {
                 synchronized(queue) {
-                    if (success) {
-                        queue.pollFirst()
-                    } else {
-                        pending.attempts += 1
-                        if (pending.attempts >= MAX_WRITE_ATTEMPTS) {
-                            // The receiver cannot reassemble a message with a
-                            // missing frame. Abort queued traffic for this link
-                            // and let the message-level ACK timeout report failure.
-                            queue.clear()
-                            safeBleError("BLE queue aborted after $MAX_WRITE_ATTEMPTS attempts for $address")
+                    val current = queue.peekFirst()
+                    if (current != null) {
+                        if (success) {
+                            current.frameIndex += 1
+                            if (current.frameIndex >= current.frames.size) {
+                                queue.pollFirst()
+                                current.completed = true
+                                messageFinished = true
+                                finishedMsgId = current.meshMsgId
+                            }
                         } else {
-                            retry = true
+                            current.attempts += 1
+                            if (current.attempts >= MAX_WRITE_ATTEMPTS) {
+                                queue.pollFirst()
+                                failedMsgId = current.meshMsgId
+                            } else {
+                                // Restart this multi-frame message from the top.
+                                current.frameIndex = 0
+                                shouldRetry = true
+                            }
                         }
                     }
-                    if (queue.isEmpty()) writeQueues.remove(address, queue)
+                    if (queue.isEmpty()) txQueues.remove(address, queue)
                 }
             }
-            writesInFlight.remove(address)
-            mainHandler.postDelayed({ drainWriteQueue(address) }, if (retry) 100L else 5L)
+            txInFlight.remove(address)
+
+            // Fire transport callbacks OUTSIDE the queue lock.
+            if (messageFinished && finishedMsgId != null) {
+                NativeBridge.onTransportSent(finishedMsgId!!)
+            }
+            if (failedMsgId != null) {
+                NativeBridge.onTransportFailed(failedMsgId!!, "Zapis GATT nie powiodl sie po $MAX_WRITE_ATTEMPTS probach")
+            }
+            mainHandler.postDelayed({ drainWriteQueue(address) }, if (shouldRetry) 150L else 5L)
         }
     }
 
@@ -665,12 +798,35 @@ object BleManager {
         }
     }
 
-    private fun clearAddressState(address: String) {
+    private fun handleDisconnect(address: String) {
+        // Tear down in-flight transfers for this link; the Rust outbox retries.
         rxBuffers.keys.removeIf { it.address == address }
-        writeQueues.remove(address)
-        writesInFlight.remove(address)
-        writeTimeouts.remove(address)?.let { callback -> mainHandler.removeCallbacks(callback) }
-        connectingAddresses.remove(address)
+        negotiatedMtu.remove(address)
+        frameTimeouts.remove(address)?.let { mainHandler.removeCallbacks(it) }
+        connectTimeouts.remove(address)?.let { mainHandler.removeCallbacks(it) }
+        val queue = txQueues.remove(address)
+        if (queue != null) {
+            synchronized(queue) {
+                val pending = queue.filter { !it.completed }
+                for (msg in pending) {
+                    NativeBridge.onTransportFailed(msg.meshMsgId, "Rozlaczono GATT w trakcie transmisji")
+                }
+                queue.clear()
+            }
+        }
+        txInFlight.remove(address)
+        NativeBridge.onPeerDisconnected(address)
+        // Tear down the server if nobody is connected to either role.
+        if (serverConnectedDevices.isEmpty() && connectedGatts.isEmpty()) {
+            try { gattServer?.close() } catch (_: Throwable) {}
+            gattServer = null
+        }
+    }
+
+    private fun closeGattFor(address: String) {
+        connectedGatts.remove(address)?.let { gatt ->
+            try { gatt.close() } catch (_: Throwable) {}
+        }
     }
 
     private fun safeBleError(message: String) {

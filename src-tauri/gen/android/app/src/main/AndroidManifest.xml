@@ -13,6 +13,13 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
+    <!-- Foreground service keeps scanning / GATT alive when the UI is backgrounded.
+         connectedDevice type is required on Android 14 (API 34)+ for BLE. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <!-- NFC (legacy tag reading; UI now uses QR) -->
     <uses-permission android:name="android.permission.NFC" />
     <uses-feature android:name="android.hardware.nfc" android:required="false" />
@@ -56,5 +63,11 @@
             android:name="android.support.FILE_PROVIDER_PATHS"
             android:resource="@xml/file_paths" />
         </provider>
-    </application>
+
+        <!-- Keeps BLE scanning / GATT / message relay alive in the background.
+             foregroundServiceType is required on Android 14 (API 34)+. -->
+        <service
+            android:name=".BleForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 </manifest>

@@ -313,6 +313,47 @@ fn get_connected_addresses(mesh: State<'_, mesh::MeshState>) -> Vec<String> {
 }
 
 #[tauri::command]
+fn drain_inbox(mesh: State<'_, mesh::MeshState>) -> Vec<serde_json::Value> {
+    mesh::drain_inbox(&mesh)
+        .into_iter()
+        .map(|record| {
+            serde_json::json!({
+                "id": record.msg_id,
+                "peerId": record.peer_id,
+                "text": record.text,
+                "timestamp": record.created_at_ms,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn ack_inbox(mesh: State<'_, mesh::MeshState>, ids: Vec<String>) -> Result<usize, String> {
+    mesh::ack_inbox(&mesh, &ids)
+}
+
+/// Native BLE bridge reports that the last frame of a full mesh message was
+/// written. `mesh_msg_id` is the full UUID from the envelope body.
+#[tauri::command]
+fn note_transport_sent(
+    app: tauri::AppHandle,
+    mesh: State<'_, mesh::MeshState>,
+    mesh_msg_id: String,
+) {
+    mesh::note_transport_sent(&app, &mesh, &mesh_msg_id);
+}
+
+#[tauri::command]
+fn note_transport_failed(
+    app: tauri::AppHandle,
+    mesh: State<'_, mesh::MeshState>,
+    mesh_msg_id: String,
+    reason: String,
+) {
+    mesh::note_transport_failed(&app, &mesh, &mesh_msg_id, &reason);
+}
+
+#[tauri::command]
 fn ble_init(
     state: State<'_, AppState>,
     mesh: State<'_, mesh::MeshState>,
@@ -383,7 +424,7 @@ fn ble_send_message(address: String, text: String) -> Result<bool, String> {
     if address.len() > 32 || text.len() > mesh::MAX_ENVELOPE_BYTES {
         return Err("Nieprawidlowy rozmiar danych BLE".to_string());
     }
-    native_bridge::calls::send_message(&address, &text)
+    native_bridge::calls::send_message(&address, &text, None)
 }
 
 #[tauri::command]
@@ -510,7 +551,11 @@ pub fn run() {
             mesh_send_location,
             mesh_flush_outbox,
             mesh_send_sos,
-            get_connected_addresses
+            get_connected_addresses,
+            drain_inbox,
+            ack_inbox,
+            note_transport_sent,
+            note_transport_failed
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   startMesh,
@@ -24,6 +24,11 @@ export function useMesh() {
   const [connectedAddresses, setConnectedAddresses] = useState<string[]>([]);
   const [nodeId, setNodeId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Guard against starting mesh twice (mount effect + permission callback can
+  // both fire on first launch, which used to restart advertising/GATT mid-link).
+  const meshStartingRef = useRef(false);
+  const meshStartedRef = useRef(false);
 
   const connected = connectedAddresses.length > 0;
 
@@ -69,26 +74,28 @@ export function useMesh() {
         );
         if (existingIndex >= 0) {
           const updated = [...prev];
+          // Discovered is NOT connected. Only update discovery metadata; do
+          // not flip a known peer to online just because we saw an advert.
           updated[existingIndex] = {
             ...updated[existingIndex],
             name: payload.name || updated[existingIndex].name,
             rssi: payload.rssi,
             address: payload.address,
-            online: true,
           };
           return updated;
-        } else {
-          return [
-            ...prev,
-            {
-              id: payload.shortId,
-              name: payload.name || payload.shortId,
-              online: true,
-              rssi: payload.rssi,
-              address: payload.address,
-            },
-          ];
         }
+        // A new BLE discovery is "seen" but offline until the signed presence
+        // handshake over an established GATT link sets it online.
+        return [
+          ...prev,
+          {
+            id: payload.shortId,
+            name: payload.name || payload.shortId,
+            online: false,
+            rssi: payload.rssi,
+            address: payload.address,
+          },
+        ];
       });
     });
 
@@ -118,16 +125,19 @@ export function useMesh() {
     });
 
     const permPromise = listen('ble_permissions_granted', () => {
-      if (isMounted) {
-        startMesh().then(() => setError(null)).catch((meshError) => {
+      if (!isMounted || meshStartedRef.current) return;
+      meshStartingRef.current = true;
+      startMesh()
+        .then(() => { meshStartedRef.current = true; if (isMounted) setError(null); })
+        .catch((meshError) => {
           if (isMounted) setError(String(meshError));
-        });
-        getConnectedAddresses()
-          .then(addrs => {
-            if (isMounted && addrs) setConnectedAddresses(addrs);
-          })
-          .catch(() => {});
-      }
+        })
+        .finally(() => { meshStartingRef.current = false; });
+      getConnectedAddresses()
+        .then(addrs => {
+          if (isMounted && addrs) setConnectedAddresses(addrs);
+        })
+        .catch(() => {});
     }).catch(() => undefined);
 
     const locationPromise = onPeerLocationReceived((payload: PeerLocationPayload) => {
@@ -180,6 +190,8 @@ export function useMesh() {
     };
 
     const initMesh = async () => {
+      if (meshStartedRef.current || meshStartingRef.current) return;
+      meshStartingRef.current = true;
       try {
         const savedProfile = localStorage.getItem('vortex-profile');
         const displayName = savedProfile
@@ -223,17 +235,26 @@ export function useMesh() {
         if (isMounted && !(window as any)['__TAURI_INTERNALS__']) {
           setPeers([]);
         }
+      } finally {
+        meshStartingRef.current = false;
+        // Mark started even if BLE permissions are pending; the permission
+        // listener must not start a second mesh instance.
+        meshStartedRef.current = true;
       }
     };
 
     // Node ID ładuje się niezależnie od BLE — użytkownik zawsze widzi swoje ID
     initNodeId();
     initMesh();
+    // Retry pending outbox messages with exponential backoff handled in Rust.
+    // We tick often enough that a reconnect or a recovered GATT link retries
+    // promptly, but the real flush is also triggered by transport callbacks
+    // and onPeerConnected.
     const outboxInterval = setInterval(() => {
       if (isMounted && (window as any)['__TAURI_INTERNALS__']) {
         void meshFlushOutbox().catch(() => {});
       }
-    }, 30_000);
+    }, 5_000);
 
     return () => {
       clearInterval(outboxInterval);

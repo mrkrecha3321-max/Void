@@ -38,6 +38,11 @@ class MainActivity : TauriActivity() {
     } catch (error: Exception) {
       android.util.Log.w("MainActivity", "NfcManager.init failed", error)
     }
+    if (requiredBlePermissions().all {
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    }) {
+      BleForegroundService.start(applicationContext)
+    }
     requestBlePermissionsIfNeeded()
   }
 
@@ -75,6 +80,9 @@ class MainActivity : TauriActivity() {
     android.util.Log.i("MainActivity", "BLE permissions granted=$requiredGranted")
     if (requiredGranted) {
       try {
+        // Promote BLE to a foreground service so scanning / GATT / relay
+        // continue when the UI is backgrounded or the screen turns off.
+        BleForegroundService.start(applicationContext)
         // Rust owns initialization order. The frontend listener calls
         // start_mesh, which first sets the authenticated Node ID and only then
         // starts advertising. Starting here used to advertise an empty ID.

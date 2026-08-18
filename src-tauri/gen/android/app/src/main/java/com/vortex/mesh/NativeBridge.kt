@@ -11,6 +11,10 @@ object NativeBridge {
     @JvmStatic external fun onPeerDisconnected(address: String)
     @JvmStatic external fun onMessageReceived(address: String, text: String)
     @JvmStatic external fun onBleError(message: String)
+    /** Full mesh message (UUID) was fully written over the GATT link. */
+    @JvmStatic external fun onTransportSent(meshMsgId: String)
+    /** Final transport failure after GATT retries/timeout/disconnect. */
+    @JvmStatic external fun onTransportFailed(meshMsgId: String, reason: String)
     @JvmStatic external fun onNfcTagRead(payload: String)
     @JvmStatic external fun onNfcError(message: String)
     @JvmStatic external fun onPermissionsGranted()

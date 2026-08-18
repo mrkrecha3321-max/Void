@@ -336,14 +336,23 @@ function App() {
           )}
 
           {activeChat ? (
-            <ChatView
-              chatId={activeChat.chatId}
-              chatName={activeChat.peerName}
-              messages={messages[activeChat.chatId] || []}
-              onBack={handleBackFromChat}
-              onSend={sendMessage}
-              onOpenSettings={() => setShowSettings(true)}
-            />
+            (() => {
+              const chat = chats.find(c => c.id === activeChat.chatId);
+              const peerOnline = chat
+                ? (peers.find(p => p.id === chat.peerId)?.online ?? false)
+                : false;
+              return (
+                <ChatView
+                  chatId={activeChat.chatId}
+                  chatName={activeChat.peerName}
+                  messages={messages[activeChat.chatId] || []}
+                  peerOnline={peerOnline}
+                  onBack={handleBackFromChat}
+                  onSend={sendMessage}
+                  onOpenSettings={() => setShowSettings(true)}
+                />
+              );
+            })()
           ) : (
             <div className="flex-1 flex flex-col items-center justify-center opacity-60">
               <div className="w-24 h-24 bg-secondary/50 rounded-full flex items-center justify-center mb-6">

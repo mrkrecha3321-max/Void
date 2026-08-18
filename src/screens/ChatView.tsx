@@ -11,6 +11,7 @@ interface Props {
   chatName?: string;
   messages?: Message[];
   chat?: ChatNode;
+  peerOnline?: boolean;
   onBack: () => void;
   onSend?: (chatId: string, text: string) => void;
   onSendMessage?: (chatId: string, text: string) => void;
@@ -28,6 +29,7 @@ const ChatView: React.FC<Props> = ({
   chatName,
   messages,
   chat,
+  peerOnline = false,
   onBack,
   onSend,
   onSendMessage,
@@ -67,12 +69,14 @@ const ChatView: React.FC<Props> = ({
         >
           <ChevronLeft size={28} strokeWidth={2.5} />
         </button>
-        <Avatar name={title} size={40} online={true} />
+        <Avatar name={title} size={40} online={peerOnline} />
         <div className="flex-1 flex flex-col overflow-hidden min-w-0 ml-1 py-2">
           <span className="text-base font-bold text-foreground truncate">{title}</span>
           <div className="flex items-center gap-1 mt-0.5">
-            <Shield size={10} className="text-emerald-500" />
-            <span className="text-[10px] text-muted-foreground truncate uppercase tracking-widest font-bold">E2EE Mesh</span>
+            <Shield size={10} className={peerOnline ? 'text-emerald-500' : 'text-muted-foreground/60'} />
+            <span className={`text-[10px] truncate uppercase tracking-widest font-bold ${peerOnline ? 'text-emerald-500' : 'text-muted-foreground'}`}>
+              {peerOnline ? 'Połączono · E2EE Mesh' : 'Brak połączenia · E2EE Mesh'}
+            </span>
           </div>
         </div>
         <div className="flex items-center gap-1 mr-1 sm:mr-2">

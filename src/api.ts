@@ -37,6 +37,10 @@ export const loadChatState = (): Promise<{ chats: unknown[]; messages: Record<st
   invoke('load_chat_state');
 export const saveChatState = (chatState: unknown): Promise<void> =>
   invoke('save_chat_state', { chatState });
+export const drainInbox = (): Promise<
+  { id: string; peerId: string; text: string; timestamp: number }[]
+> => invoke('drain_inbox');
+export const ackInbox = (ids: string[]): Promise<number> => invoke('ack_inbox', { ids });
 export const exportIdentityBackup = (password: string): Promise<string> =>
   invoke('export_identity_backup', { password });
 export const importIdentityBackup = (backupJson: string, password: string): Promise<void> =>

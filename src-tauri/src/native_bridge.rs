@@ -155,6 +155,38 @@ mod android {
     }
 
     #[no_mangle]
+    pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onTransportSent(
+        mut env: JNIEnv,
+        _this: JObject,
+        mesh_msg_id: JString,
+    ) {
+        let mesh_msg_id = jstr(&mut env, &mesh_msg_id);
+        if let Some(cell) = super::APP_HANDLE.get() {
+            if let Some(app) = cell.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let state = app.state::<crate::mesh::MeshState>();
+                crate::mesh::note_transport_sent(app, &state, &mesh_msg_id);
+            }
+        }
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onTransportFailed(
+        mut env: JNIEnv,
+        _this: JObject,
+        mesh_msg_id: JString,
+        reason: JString,
+    ) {
+        let mesh_msg_id = jstr(&mut env, &mesh_msg_id);
+        let reason = jstr(&mut env, &reason);
+        if let Some(cell) = super::APP_HANDLE.get() {
+            if let Some(app) = cell.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                let state = app.state::<crate::mesh::MeshState>();
+                crate::mesh::note_transport_failed(app, &state, &mesh_msg_id, &reason);
+            }
+        }
+    }
+
+    #[no_mangle]
     pub extern "system" fn Java_com_vortex_mesh_NativeBridge_onNfcTagRead(
         mut env: JNIEnv,
         _this: JObject,
@@ -394,7 +426,11 @@ pub mod calls {
         Ok(())
     }
 
-    pub fn send_message(address: &str, text: &str) -> Result<bool, String> {
+    pub fn send_message(
+        address: &str,
+        text: &str,
+        mesh_msg_id: Option<&str>,
+    ) -> Result<bool, String> {
         let android_ctx = ndk_context::android_context();
         let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
         let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
@@ -409,8 +445,22 @@ pub mod calls {
         let address_j = env.new_string(address).map_err(|e| e.to_string())?;
         let text_j = env.new_string(text).map_err(|e| e.to_string())?;
         let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
-        let res = env
-            .call_static_method(
+        let res = match mesh_msg_id {
+            Some(id) => {
+                let id_j = env.new_string(id).map_err(|e| e.to_string())?;
+                env.call_static_method(
+                    class,
+                    "sendMessage",
+                    "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z",
+                    &[
+                        JValue::Object(ctx),
+                        JValue::Object(&address_j.into()),
+                        JValue::Object(&text_j.into()),
+                        JValue::Object(&id_j.into()),
+                    ],
+                )
+            }
+            None => env.call_static_method(
                 class,
                 "sendMessage",
                 "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Z",
@@ -419,8 +469,9 @@ pub mod calls {
                     JValue::Object(&address_j.into()),
                     JValue::Object(&text_j.into()),
                 ],
-            )
-            .map_err(|e| e.to_string())?;
+            ),
+        }
+        .map_err(|e| e.to_string())?;
         res.z().map_err(|e| e.to_string())
     }
 
@@ -488,7 +539,11 @@ pub mod calls {
     pub fn update_settings(_hidden: bool, _battery_save: bool) -> Result<(), String> {
         Ok(())
     }
-    pub fn send_message(_address: &str, _text: &str) -> Result<bool, String> {
+    pub fn send_message(
+        _address: &str,
+        _text: &str,
+        _mesh_msg_id: Option<&str>,
+    ) -> Result<bool, String> {
         Err("BLE dostepne tylko na Androidzie".into())
     }
     pub fn connect_to_peer(_address: &str) -> Result<bool, String> {

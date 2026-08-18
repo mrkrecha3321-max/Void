@@ -17,6 +17,12 @@ const MAX_VAULT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHAT_STATE_BYTES: usize = 1024 * 1024;
 const MAX_PEERS: usize = 2_048;
 const MAX_OUTBOX: usize = 500;
+const MAX_INBOX: usize = 1_000;
+const MAX_TEXT_BYTES: usize = 2_048;
+const INBOX_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+const OUTBOX_MAX_ATTEMPTS: u32 = 8;
+const OUTBOX_BASE_BACKOFF_MS: u64 = 2_000;
+const OUTBOX_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_REPLAY_IDS: usize = 10_000;
 const REPLAY_COMPACT_BYTES: u64 = 2 * 1024 * 1024;
 const REPLAY_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
@@ -62,6 +68,41 @@ pub struct OutboxRecord {
     pub msg_id: String,
     pub envelope_json: String,
     pub created_at_ms: u64,
+    #[serde(default)]
+    pub last_attempt_ms: u64,
+    #[serde(default)]
+    pub attempt_count: u32,
+    /// Set while the BLE transport actively holds the message. Persisted so a
+    /// crash/restart cannot enqueue the same outbox item twice in parallel.
+    #[serde(default)]
+    pub in_flight: bool,
+}
+
+impl OutboxRecord {
+    /// Exponential backoff with a cap: base * 2^attempt (jitter is applied by
+    /// the caller using the mesh rate limiter).
+    pub fn next_attempt_delay_ms(&self) -> u64 {
+        let exp = self.attempt_count.min(6) as u32;
+        OUTBOX_BASE_BACKOFF_MS.saturating_mul(1u64 << exp).min(15 * 60 * 1_000)
+    }
+
+    pub fn is_expired(&self, now_ms: u64) -> bool {
+        now_ms.saturating_sub(self.created_at_ms) > OUTBOX_MAX_AGE_MS
+            || self.attempt_count >= OUTBOX_MAX_ATTEMPTS
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InboxRecord {
+    pub msg_id: String,
+    pub peer_id: String,
+    pub text: String,
+    pub created_at_ms: u64,
+    /// Set when the frontend has read the message but has not yet acknowledged
+    /// persistence into its own (encrypted) history. Removed on ack.
+    #[serde(default)]
+    pub delivered_to_ui: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +121,7 @@ struct VaultData {
     pub trusted_contact_ids: HashSet<String>,
     pub contact_names: HashMap<String, String>,
     pub outbox: Vec<OutboxRecord>,
+    pub inbox: Vec<InboxRecord>,
     pub chat_state: serde_json::Value,
     pub settings: CoreSettings,
 }
@@ -92,6 +134,7 @@ impl Default for VaultData {
             trusted_contact_ids: HashSet::new(),
             contact_names: HashMap::new(),
             outbox: Vec::new(),
+            inbox: Vec::new(),
             chat_state: serde_json::json!({ "chats": [], "messages": {} }),
             settings: CoreSettings::default(),
         }
@@ -323,18 +366,34 @@ impl SecureStore {
         self.persist_locked(&state.data)
     }
 
-    pub fn outbox(&self, now_ms: u64) -> Vec<OutboxRecord> {
+    /// Outbox items that are due for (re)transmission: not in-flight, not
+    /// expired, and whose backoff has elapsed. Items remain until a signed ACK
+    /// arrives via `remove_outbox`.
+    pub fn outbox_due(&self, now_ms: u64) -> Vec<OutboxRecord> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state
             .data
             .outbox
             .iter()
-            .filter(|item| now_ms.saturating_sub(item.created_at_ms) <= REPLAY_MAX_AGE_MS)
+            .filter(|item| {
+                !item.in_flight
+                    && !item.is_expired(now_ms)
+                    && now_ms.saturating_sub(item.last_attempt_ms) >= item.next_attempt_delay_ms()
+            })
             .cloned()
             .collect()
     }
 
-    pub fn enqueue_outbox(&self, item: OutboxRecord) -> Result<(), String> {
+    pub fn outbox_len(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .outbox
+            .len()
+    }
+
+    pub fn enqueue_outbox(&self, mut item: OutboxRecord) -> Result<bool, String> {
         if item.envelope_json.len() > 4_080 {
             return Err("Koperta outbox jest zbyt duza".to_string());
         }
@@ -345,20 +404,77 @@ impl SecureStore {
             .iter()
             .any(|queued| queued.msg_id == item.msg_id)
         {
-            return Ok(());
+            // Deduplicate: never enqueue the same signed message twice.
+            return Ok(false);
         }
         if state.data.outbox.len() >= MAX_OUTBOX {
             return Err("Outbox jest pelny".to_string());
         }
+        // First attempt is immediate.
+        item.last_attempt_ms = item.created_at_ms;
+        item.attempt_count = 0;
+        item.in_flight = false;
         state.data.outbox.push(item);
-        self.persist_locked(&state.data)
+        self.persist_locked(&state.data)?;
+        Ok(true)
     }
 
+    /// Mark an outbox item as actively being transmitted and record an attempt.
+    /// Returns false (without mutation) if the item is already in flight,
+    /// preventing parallel GATT writes for the same message.
+    pub fn mark_outbox_in_flight(&self, msg_id: &str, now_ms: u64) -> Result<bool, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let Some(item) = state.data.outbox.iter_mut().find(|i| i.msg_id == msg_id) else {
+            return Ok(false);
+        };
+        if item.in_flight {
+            return Ok(false);
+        }
+        item.in_flight = true;
+        item.last_attempt_ms = now_ms;
+        item.attempt_count = item.attempt_count.saturating_add(1);
+        self.persist_locked(&state.data)?;
+        Ok(true)
+    }
+
+    /// Called by the transport when the last BLE frame was written. The item
+    /// stays in the outbox until a signed ACK; it becomes eligible for retry
+    /// only after its backoff elapses.
+    pub fn mark_outbox_sent(&self, msg_id: &str, now_ms: u64) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if let Some(item) = state.data.outbox.iter_mut().find(|i| i.msg_id == msg_id) {
+            item.in_flight = false;
+            item.last_attempt_ms = now_ms;
+            self.persist_locked(&state.data)?;
+        }
+        Ok(())
+    }
+
+    /// A transport failure (GATT error/timeout) releases the in-flight lock so
+    /// the item can be retried after backoff. Returns true if the item has
+    /// exhausted its retries / TTL and should be reported as failed.
+    pub fn mark_outbox_failed(&self, msg_id: &str, now_ms: u64) -> Result<bool, String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let Some(item) = state.data.outbox.iter_mut().find(|i| i.msg_id == msg_id) else {
+            return Ok(true);
+        };
+        item.in_flight = false;
+        item.last_attempt_ms = now_ms;
+        let exhausted = item.is_expired(now_ms);
+        if exhausted {
+            state.data.outbox.retain(|i| i.msg_id != msg_id);
+        }
+        self.persist_locked(&state.data)?;
+        Ok(exhausted)
+    }
+
+    /// Remove expired/exhausted outbox items, returning the msgIds that the UI
+    /// should mark as permanently failed.
     pub fn prune_outbox(&self, now_ms: u64) -> Result<Vec<String>, String> {
         let mut state = self.state.lock().map_err(|e| e.to_string())?;
         let mut removed = Vec::new();
         state.data.outbox.retain(|item| {
-            let keep = now_ms.saturating_sub(item.created_at_ms) <= REPLAY_MAX_AGE_MS;
+            let keep = !item.is_expired(now_ms);
             if !keep {
                 removed.push(item.msg_id.clone());
             }
@@ -378,6 +494,93 @@ impl SecureStore {
             self.persist_locked(&state.data)?;
         }
         Ok(())
+    }
+
+    // ---- Durable inbox (received but not yet shown in UI) ----
+
+    /// Persist a fully validated + decrypted inbound text message *before*
+    /// emitting it to the WebView. Returns true if it is a new message
+    /// (caller should emit + ACK); false if it was already present (duplicate
+    /// re-delivery after a lost ACK — caller should re-ACK but not re-emit).
+    pub fn inbox_put(&self, record: InboxRecord) -> Result<bool, String> {
+        if record.text.len() > MAX_TEXT_BYTES {
+            return Err("Wiadomosc inbox przekracza limit".to_string());
+        }
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if state.data.inbox.iter().any(|r| r.msg_id == record.msg_id) {
+            return Ok(false);
+        }
+        if state.data.inbox.len() >= MAX_INBOX {
+            // Drop the oldest delivered/seen entry rather than refusing a new
+            // inbound message entirely.
+            if let Some(pos) = state
+                .data
+                .inbox
+                .iter()
+                .position(|r| r.delivered_to_ui)
+            {
+                state.data.inbox.remove(pos);
+            } else if state.data.inbox.len() >= MAX_INBOX {
+                return Err("Inbox jest pelny".to_string());
+            }
+        }
+        state.data.inbox.push(record);
+        // Opportunistic cleanup of old records so the inbox cannot grow without
+        // bound if the frontend never acks.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        state
+            .data
+            .inbox
+            .retain(|r| now.saturating_sub(r.created_at_ms) <= INBOX_MAX_AGE_MS);
+        self.persist_locked(&state.data)?;
+        Ok(true)
+    }
+
+    /// Snapshot pending inbox records for the frontend, oldest first.
+    pub fn inbox_pending(&self) -> Vec<InboxRecord> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut items: Vec<InboxRecord> = state
+            .data
+            .inbox
+            .iter()
+            .filter(|r| !r.delivered_to_ui)
+            .cloned()
+            .collect();
+        items.sort_by_key(|r| r.created_at_ms);
+        items
+    }
+
+    /// Frontend has incorporated these messages into its own (encrypted)
+    /// history. Records are atomically removed; a crash before this call keeps
+    /// them so they are redelivered on next launch.
+    pub fn inbox_ack(&self, msg_ids: &[String]) -> Result<usize, String> {
+        if msg_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let before = state.data.inbox.len();
+        let ids: HashSet<&str> = msg_ids.iter().map(String::as_str).collect();
+        state.data.inbox.retain(|r| !ids.contains(r.msg_id.as_str()));
+        let removed = before - state.data.inbox.len();
+        if removed > 0 {
+            self.persist_locked(&state.data)?;
+        }
+        Ok(removed)
+    }
+
+    /// Does a durable copy of this inbound message already exist? Used to decide
+    /// whether a duplicate envelope should be ACKed again.
+    pub fn inbox_contains(&self, msg_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .inbox
+            .iter()
+            .any(|r| r.msg_id == msg_id)
     }
 
     pub fn destroy(&self) -> Result<(), String> {
@@ -410,6 +613,7 @@ fn validate_vault_data(data: &VaultData) -> Result<(), String> {
         || data.trusted_contact_ids.len() > MAX_PEERS
         || data.contact_names.len() > MAX_PEERS
         || data.outbox.len() > MAX_OUTBOX
+        || data.inbox.len() > MAX_INBOX
     {
         return Err("Vault przekracza limity rekordow".to_string());
     }
@@ -648,6 +852,94 @@ mod tests {
         );
         drop(reopened);
         assert!(SecureStore::open(path, [9u8; 32], 1_000).is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn temp_store(seed: u8) -> (Arc<SecureStore>, PathBuf) {
+        let root = std::env::temp_dir().join(format!("void-store-{}-{}", seed, uuid::Uuid::new_v4()));
+        let path = root.join("vault.json");
+        let store = Arc::new(SecureStore::open(path.clone(), [seed; 32], now_test_ms()).unwrap());
+        (store, root)
+    }
+
+    fn now_test_ms() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    #[test]
+    fn inbox_persists_pending_messages_until_acked() {
+        let (store, root) = temp_store(11);
+        let record = InboxRecord {
+            msg_id: "msg-1".to_string(),
+            peer_id: "VX-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            text: "cześć".to_string(),
+            created_at_ms: now_test_ms(),
+            delivered_to_ui: false,
+        };
+        assert!(store.inbox_put(record.clone()).unwrap());
+        // Duplicate is idempotent and returns false (no second copy).
+        assert!(!store.inbox_put(record).unwrap());
+        assert_eq!(store.inbox_pending().len(), 1);
+        assert!(store.inbox_contains("msg-1"));
+
+        // After reopening the process, the un-acked message is still there.
+        let path = store.vault_path.clone();
+        drop(store);
+        let reopened = SecureStore::open(path, [11u8; 32], now_test_ms()).unwrap();
+        assert_eq!(reopened.inbox_pending().len(), 1);
+        assert_eq!(reopened.inbox_pending()[0].text, "cześć");
+
+        // Acknowledgement atomically removes it.
+        assert_eq!(reopened.inbox_ack(&["msg-1".to_string()]).unwrap(), 1);
+        assert!(reopened.inbox_pending().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn outbox_prevents_double_queueing_and_backs_off() {
+        let (store, root) = temp_store(12);
+        let now = 1_000_000u64;
+        let item = OutboxRecord {
+            msg_id: "out-1".to_string(),
+            envelope_json: "{}".to_string(),
+            created_at_ms: now,
+            last_attempt_ms: 0,
+            attempt_count: 0,
+            in_flight: false,
+        };
+        assert!(store.enqueue_outbox(item.clone()).unwrap());
+        // Second enqueue with same id is deduplicated.
+        assert!(!store.enqueue_outbox(item).unwrap());
+        assert_eq!(store.outbox_len(), 1);
+
+        // Immediately due for its first attempt.
+        assert_eq!(store.outbox_due(now).len(), 1);
+        assert!(store.mark_outbox_in_flight("out-1", now).unwrap());
+        // A concurrent claim must be rejected.
+        assert!(!store.mark_outbox_in_flight("out-1", now).unwrap());
+        // While in-flight it is not due.
+        assert!(store.outbox_due(now + 1).is_empty());
+
+        // After the transport reports sent (last frame written) it leaves the
+        // in-flight state but remains until an ACK; backoff must now apply.
+        store.mark_outbox_sent("out-1", now + 10).unwrap();
+        assert!(store.outbox_due(now + 100).is_empty());
+        assert!(store.outbox_due(now + 5_000).len() == 1);
+
+        // A failure increments attempts and schedules a retry; eventually the
+        // message expires and is reported as permanently failed.
+        for _ in 0..8 {
+            store.mark_outbox_in_flight("out-1", now + 10_000).unwrap();
+            let exhausted = store.mark_outbox_failed("out-1", now + 10_000).unwrap();
+            if exhausted {
+                break;
+            }
+        }
+        assert!(store.outbox_len() == 0, "exhausted outbox item is removed");
         let _ = std::fs::remove_dir_all(root);
     }
 }
