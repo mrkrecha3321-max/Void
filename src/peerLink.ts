@@ -25,6 +25,28 @@ export const peerLinkLabel = (status?: PeerLinkStatus, online?: boolean): string
   }
 };
 
+/** Match a full VX- Node ID with a radar short suffix or another full ID. */
+export const peerIdsMatch = (left?: string, right?: string): boolean => {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const normalize = (value: string): string =>
+    value.replace(/^VX-/i, '').toUpperCase();
+  const a = normalize(left);
+  const b = normalize(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.endsWith(b) || b.endsWith(a);
+};
+
+export const preferFullPeerId = (current: string, incoming: string): string => {
+  const incomingFull = /^VX-[0-9A-F]{32}$/i.test(incoming);
+  const currentFull = /^VX-[0-9A-F]{32}$/i.test(current);
+  if (incomingFull && !currentFull && peerIdsMatch(current, incoming)) {
+    return incoming;
+  }
+  return current;
+};
+
 export const mergePeerLink = (
   current: PeerLinkStatus | undefined,
   next: PeerLinkStatus,
