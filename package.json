@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test:ci": "node --test tests/tier1_build.test.mjs",
-    "test:contract-model": "node --test tests/tier1_features.test.mjs tests/tier2_boundary.test.mjs tests/tier3_cross_feature.test.mjs tests/tier4_real_world.test.mjs",
+    "test:contract-model": "node --test tests/tier1_features.test.mjs tests/tier2_boundary.test.mjs tests/tier3_cross_feature.test.mjs tests/tier4_real_world.test.mjs tests/tier5_reliability.test.mjs",
     "test:e2e": "npm run test:ci"
   },
   "dependencies": {

@@ -35,6 +35,11 @@
 - [x] lokalizacja udostępniana dopiero po jawnym opt-in
 - [x] zarządzanie zgodą i listą odbiorców lokalizacji
 - [x] zaszyfrowany outbox, retry po reconnect i retry okresowy do podpisanego ACK
+- [x] trwały szyfrowany inbox przed ACK oraz drain po starcie/wznowieniu
+- [x] foreground service connectedDevice dla BLE w tle
+- [x] transport_sent dopiero po ostatnim fragmencie, stany queued/transmitting/failed
+- [x] framing v2 zależny od wynegocjowanego MTU
+- [x] statusy discovered/connecting/connected/ready zamiast fałszywego online
 
 ## Etap P2 — testy i release quality gate
 

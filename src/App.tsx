@@ -44,7 +44,7 @@ const parseVersion = (value: string): [number, number, number] | null => {
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { peers, connected, connectedAddresses, nodeId, error: meshError, addPeer } = useMesh();
-  const { chats, messages, sendMessage, startChat, markRead, clearAllData } = useChats();
+  const { chats, messages, sendMessage, startChat, markRead, retryMessage, clearAllData } = useChats();
 
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
@@ -342,6 +342,15 @@ function App() {
               messages={messages[activeChat.chatId] || []}
               onBack={handleBackFromChat}
               onSend={sendMessage}
+              onRetry={retryMessage}
+              peerOnline={peers.find(peer => {
+                const chat = chats.find(item => item.id === activeChat.chatId);
+                return chat && (peer.id === chat.peerId || peer.id === chat.id);
+              })?.online}
+              peerLinkStatus={peers.find(peer => {
+                const chat = chats.find(item => item.id === activeChat.chatId);
+                return chat && (peer.id === chat.peerId || peer.id === chat.id);
+              })?.linkStatus}
               onOpenSettings={() => setShowSettings(true)}
             />
           ) : (
