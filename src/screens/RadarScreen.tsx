@@ -2,10 +2,10 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Radio, MapPin, Zap } from 'lucide-react';
 import type { Peer } from '../types';
-import { peerLinkLabel } from '../peerLink';
+import { isPeerVisibleOnRadar, radarPeerLinkLabel } from '../peerLink';
 import Avatar from '../components/Avatar';
 import { getCurrentPosition, checkPermissions, requestPermissions } from '@tauri-apps/plugin-geolocation';
-import { meshSendLocation } from '../api';
+import { bleStartScanning, bleStopScanning, meshSendLocation } from '../api';
 import { useSettings } from '../hooks/useSettings';
 
 interface Props {
@@ -55,11 +55,69 @@ export const calculateDistanceRssi = (
 
 const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
   const [scanning, setScanning] = useState(true);
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [radarNow, setRadarNow] = useState(() => Date.now());
   const { settings, updateSetting } = useSettings();
   const sharingLocation = settings.locationSharing;
   const [myLat, setMyLat] = useState<number | null>(null);
   const [myLon, setMyLon] = useState<number | null>(null);
   const [locationRecipients, setLocationRecipients] = useState<Set<string>>(() => new Set());
+
+  React.useEffect(() => {
+    if (!(window as any)['__TAURI_INTERNALS__']) return;
+    let mounted = true;
+    setScanBusy(true);
+    bleStartScanning()
+      .then(started => {
+        if (!mounted) return;
+        setScanning(started);
+        setScanError(started ? null : 'Nie udało się uruchomić skanowania Bluetooth.');
+      })
+      .catch(error => {
+        if (!mounted) return;
+        setScanning(false);
+        setScanError(String(error));
+      })
+      .finally(() => {
+        if (mounted) setScanBusy(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (!scanning) return;
+    setRadarNow(Date.now());
+    const interval = setInterval(() => setRadarNow(Date.now()), 1_000);
+    return () => clearInterval(interval);
+  }, [scanning]);
+
+  const toggleScanning = async () => {
+    if (scanBusy) return;
+    if (!(window as any)['__TAURI_INTERNALS__']) {
+      setScanning(current => !current);
+      return;
+    }
+    setScanBusy(true);
+    setScanError(null);
+    try {
+      if (scanning) {
+        await bleStopScanning();
+        setScanning(false);
+      } else {
+        const started = await bleStartScanning();
+        if (!started) throw new Error('Nie udało się uruchomić skanowania Bluetooth.');
+        setRadarNow(Date.now());
+        setScanning(true);
+      }
+    } catch (error) {
+      setScanError(String(error));
+    } finally {
+      setScanBusy(false);
+    }
+  };
 
   React.useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -116,7 +174,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
 
   // Widoczni ludzie posortowani po odległości
   const visiblePeers = peers
-    .filter(p => p.linkStatus === 'discovered' || p.linkStatus === 'connecting' || p.linkStatus === 'connected' || p.linkStatus === 'ready')
+    .filter(p => scanning && isPeerVisibleOnRadar(p, radarNow))
     .map(p => {
       if (myLat !== null && myLon !== null && p.lat !== undefined && p.lon !== undefined) {
         return { ...p, distance: calculateDistance(myLat, myLon, p.lat, p.lon), method: 'gps' };
@@ -140,14 +198,21 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
             {sharingLocation ? `GPS: ${locationRecipients.size} odb.` : 'GPS prywatny'}
           </button>
           <button
-            onClick={() => setScanning(!scanning)}
+            onClick={toggleScanning}
+            disabled={scanBusy}
             className={`w-10 h-10 rounded-full flex items-center justify-center transition-colors ${scanning ? 'bg-accent/20 text-accent' : 'bg-secondary text-muted-foreground'}`}
             aria-label={scanning ? 'Zatrzymaj radar' : 'Uruchom radar'}
           >
-            <Radio size={20} className={scanning ? 'animate-pulse' : ''} />
+            <Radio size={20} className={scanning || scanBusy ? 'animate-pulse' : ''} />
           </button>
         </div>
       </header>
+
+      {scanError && (
+        <div className="px-6 py-2 text-xs text-red-500 border-b border-red-500/20">
+          {scanError}
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto relative z-0 flex flex-col">
         {/* Radar Animation Area */}
@@ -212,7 +277,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
                       </span>
                     </div>
                     <p className="text-xs text-muted-foreground truncate opacity-70">
-                      {peerLinkLabel(peer.linkStatus, peer.online)} · ID: {peer.id.slice(0, 8).toUpperCase()}
+                      {radarPeerLinkLabel(peer, radarNow)} · ID: {peer.id.slice(0, 8).toUpperCase()}
                     </p>
                   </div>
                   {/^VX-[0-9A-F]{32}$/i.test(peer.id) && (

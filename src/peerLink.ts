@@ -8,6 +8,35 @@ export type PeerLinkStatus =
 export const isPeerOnline = (status?: PeerLinkStatus, online?: boolean): boolean =>
   status === 'ready' || (status === undefined && online === true);
 
+export const RADAR_PEER_TTL_MS = 15_000;
+
+interface RadarPeerState {
+  linkStatus?: PeerLinkStatus;
+  online?: boolean;
+  lastBleSeenAt?: number;
+}
+
+export const wasPeerRecentlySeen = (
+  peer: RadarPeerState,
+  now: number,
+  ttlMs: number = RADAR_PEER_TTL_MS,
+): boolean =>
+  typeof peer.lastBleSeenAt === 'number' &&
+  now >= peer.lastBleSeenAt &&
+  now - peer.lastBleSeenAt <= ttlMs;
+
+export const isPeerVisibleOnRadar = (peer: RadarPeerState, now: number): boolean =>
+  peer.linkStatus === 'connected' ||
+  peer.linkStatus === 'ready' ||
+  wasPeerRecentlySeen(peer, now);
+
+export const radarPeerLinkLabel = (peer: RadarPeerState, now: number): string => {
+  if (wasPeerRecentlySeen(peer, now) && peer.linkStatus === 'disconnected') {
+    return 'Wykryty';
+  }
+  return peerLinkLabel(peer.linkStatus, peer.online);
+};
+
 export const peerLinkLabel = (status?: PeerLinkStatus, online?: boolean): string => {
   switch (status) {
     case 'discovered':
