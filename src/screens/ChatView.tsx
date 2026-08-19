@@ -41,6 +41,7 @@ const ChatView: React.FC<Props> = ({
 }) => {
   const listRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
 
   const id = chatId || chat?.id || 'chat';
   const title = chatName || chat?.name || id;
@@ -55,16 +56,56 @@ const ChatView: React.FC<Props> = ({
     messagesEndRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' });
   };
 
+  const isNearBottom = () => {
+    const list = listRef.current;
+    if (!list) return true;
+    return list.scrollHeight - list.scrollTop - list.clientHeight < 80;
+  };
+
+  // Track whether the user is reading the newest messages so automatic
+  // scrolling never yanks them away from older parts of the conversation.
   useEffect(() => {
-    scrollToBottom(msgList.length > 1);
+    const list = listRef.current;
+    if (!list) return;
+    const onScroll = () => {
+      stickToBottomRef.current = isNearBottom();
+    };
+    list.addEventListener('scroll', onScroll, { passive: true });
+    return () => list.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // Opening a conversation always starts at the newest messages.
+  useEffect(() => {
+    stickToBottomRef.current = true;
+    scrollToBottom(false);
+  }, [id]);
+
+  // New messages only auto-scroll when the user was already at the bottom.
+  useEffect(() => {
+    if (stickToBottomRef.current) {
+      scrollToBottom(msgList.length > 1);
+    }
   }, [msgList.length, msgList[msgList.length - 1]?.id]);
 
+  // Keyboard open/close (and rotation) changes the available height; keep the
+  // newest messages visible only when the user was already reading them.
   useEffect(() => {
     const viewport = window.visualViewport;
-    if (!viewport) return;
-    const onResize = () => scrollToBottom(false);
-    viewport.addEventListener('resize', onResize);
-    return () => viewport.removeEventListener('resize', onResize);
+    const onResize = () => {
+      if (stickToBottomRef.current) {
+        scrollToBottom(false);
+      }
+    };
+    if (viewport) {
+      viewport.addEventListener('resize', onResize);
+    }
+    window.addEventListener('resize', onResize);
+    return () => {
+      if (viewport) {
+        viewport.removeEventListener('resize', onResize);
+      }
+      window.removeEventListener('resize', onResize);
+    };
   }, []);
 
   const handleSend = (text: string) => {
