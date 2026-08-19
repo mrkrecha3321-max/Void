@@ -241,7 +241,6 @@ export function useMesh() {
         await startMesh();
         if (isMounted) setError(null);
       } catch (err) {
-        // The permission callback retries startup after the user grants BLE.
         if (isMounted) setError(String(err));
       }
 
@@ -271,7 +270,6 @@ export function useMesh() {
       }
     };
 
-    // Node ID ładuje się niezależnie od BLE — użytkownik zawsze widzi swoje ID
     initNodeId();
     initMesh();
     const outboxInterval = setInterval(() => {

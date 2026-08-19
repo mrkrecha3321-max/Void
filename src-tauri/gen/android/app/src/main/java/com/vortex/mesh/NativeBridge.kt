@@ -2,7 +2,7 @@ package com.vortex.mesh
 
 import android.content.Context
 
-// Wywolania z Kotlina do Rust (JNI). Implementacja: src-tauri/src/native_bridge.rs
+// Kotlin-to-Rust JNI declarations are implemented in src-tauri/src/native_bridge.rs.
 object NativeBridge {
     @JvmStatic external fun setAndroidContext(context: Context)
     @JvmStatic external fun setClassLoader(classLoader: ClassLoader)

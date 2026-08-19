@@ -54,7 +54,6 @@ export const peerLinkLabel = (status?: PeerLinkStatus, online?: boolean): string
   }
 };
 
-/** Match a full VX- Node ID with a radar short suffix or another full ID. */
 export const peerIdsMatch = (left?: string, right?: string): boolean => {
   if (!left || !right) return false;
   if (left === right) return true;

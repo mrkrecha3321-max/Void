@@ -19,7 +19,6 @@ const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background">
-      {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 pt-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Void</h1>
         <button className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors">

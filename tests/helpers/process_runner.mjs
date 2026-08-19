@@ -1,13 +1,5 @@
 import { spawn } from 'node:child_process';
 
-/**
- * Asynchronously executes a CLI command and returns exit code, stdout, and stderr.
- *
- * @param {string} cmd - Command to execute (e.g. 'npm', 'npx', 'cargo')
- * @param {string[]} [args=[]] - Array of argument strings
- * @param {string} [cwd=process.cwd()] - Working directory for execution
- * @returns {Promise<{ exitCode: number, stdout: string, stderr: string }>}
- */
 export async function runCommand(cmd, args = [], cwd = process.cwd()) {
   return new Promise((resolve) => {
     const isWindows = process.platform === 'win32';

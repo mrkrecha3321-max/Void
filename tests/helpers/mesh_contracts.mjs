@@ -1,33 +1,18 @@
-/**
- * Mesh & Cryptographic Pure Contract Functions for Void 2.0 Testing
- */
 
-/**
- * Calculates physical distance in meters from raw BLE RSSI (dBm) using Path Loss model.
- * Formula: d = 10 ^ ((measuredPower - rssi) / (10 * n))
- * Clamps distance to < 1.0m when rssi >= -50 dBm.
- * Returns safe fallback distance (5.0m or 100.0m) for invalid/extreme RSSI values.
- *
- * @param {number} rssi - Signal strength in dBm (e.g. -40, -55, -80)
- * @param {number} [measuredPower=-59] - RSSI at 1 meter distance
- * @param {number} [n=2.0] - Path loss exponent (propagation environment factor)
- * @returns {number} Distance in meters
- */
 export function calculateRssiDistance(rssi, measuredPower = -59, n = 2.0) {
   if (rssi === null || rssi === undefined || typeof rssi !== 'number' || isNaN(rssi)) {
-    return 5.0; // Safe fallback for missing/NaN/null RSSI
+    return 5.0;
   }
   if (rssi >= 0) {
-    return 5.0; // Safe fallback for invalid non-negative RSSI values
+    return 5.0;
   }
   if (rssi <= -120) {
-    return 100.0; // Safe fallback clamp for extreme low RSSI
+    return 100.0;
   }
 
   const exponent = (measuredPower - rssi) / (10 * n);
   let distance = Math.pow(10, exponent);
 
-  // Close-range clamp for strong signal (rssi >= -50 dBm)
   if (rssi >= -50) {
     distance = Math.min(distance, 0.95);
   }
@@ -35,14 +20,6 @@ export function calculateRssiDistance(rssi, measuredPower = -59, n = 2.0) {
   return Number(distance.toFixed(4));
 }
 
-/**
- * Creates a valid MeshEnvelope object for presence packet exchange.
- *
- * @param {string} nodeId - Sender node ID (e.g. "VX-A1B2C3D4")
- * @param {string} name - Sender display name
- * @param {string} pubkeyB64 - X25519 public key encoded in Base64 (32 bytes)
- * @returns {object} MeshEnvelope object
- */
 export function createPresenceEnvelope(nodeId, name, pubkeyB64) {
   return {
     msgId: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
@@ -57,12 +34,6 @@ export function createPresenceEnvelope(nodeId, name, pubkeyB64) {
   };
 }
 
-/**
- * Validates the structure and fields of a presence MeshEnvelope.
- *
- * @param {object} envelope - MeshEnvelope candidate
- * @returns {boolean} True if envelope is valid presence format
- */
 export function validatePresenceEnvelope(envelope) {
   if (!envelope || typeof envelope !== 'object') return false;
   if (envelope.msgType !== 'presence') return false;
@@ -72,12 +43,6 @@ export function validatePresenceEnvelope(envelope) {
   return true;
 }
 
-/**
- * Returns the network connection status based on active GATT connected addresses.
- *
- * @param {string[]} connectedAddresses - List of connected device MAC addresses
- * @returns {"CONNECTED" | "DISCONNECTED"} Connection status string
- */
 export function updateP2pStatus(connectedAddresses) {
   if (Array.isArray(connectedAddresses) && connectedAddresses.length > 0) {
     return 'CONNECTED';
@@ -85,12 +50,6 @@ export function updateP2pStatus(connectedAddresses) {
   return 'DISCONNECTED';
 }
 
-/**
- * Validates X25519 Public Key format (Base64 string representing exactly 32 bytes).
- *
- * @param {string} pubkeyB64 - Public key in Base64 string format
- * @returns {boolean} True if valid 32-byte Base64 string
- */
 export function validateX25519Pubkey(pubkeyB64) {
   if (typeof pubkeyB64 !== 'string' || pubkeyB64.trim().length === 0) return false;
   try {
@@ -101,14 +60,6 @@ export function validateX25519Pubkey(pubkeyB64) {
   }
 }
 
-/**
- * Simulates presence packet processing on peer receipt.
- * Updates known pubkey map and creates chat for sender.
- *
- * @param {{ knownPubkeys: Map<string, string>, chats: Map<string, { id: string, name: string }> }} state
- * @param {object} envelope - Received presence envelope
- * @returns {boolean} Success status
- */
 export function handlePresenceReceipt(state, envelope) {
   if (!validatePresenceEnvelope(envelope)) {
     return false;
@@ -117,10 +68,8 @@ export function handlePresenceReceipt(state, envelope) {
     return false;
   }
 
-  // 1. Store pubkey
   state.knownPubkeys.set(envelope.senderId, envelope.senderPubkey);
 
-  // 2. Auto-create chat if not existing
   if (!state.chats.has(envelope.senderId)) {
     state.chats.set(envelope.senderId, {
       id: envelope.senderId,
@@ -131,15 +80,6 @@ export function handlePresenceReceipt(state, envelope) {
   return true;
 }
 
-/**
- * Simulates sending text message contract check.
- * Requires recipient public key to be present in knownPubkeys.
- *
- * @param {{ knownPubkeys: Map<string, string> }} state
- * @param {string} recipientId - Recipient node ID
- * @param {string} text - Message content
- * @returns {{ success: boolean, error?: string, payload?: object }} Result object
- */
 export function sendTextContract(state, recipientId, text) {
   const pubkey = state.knownPubkeys.get(recipientId);
   if (!pubkey) {
@@ -160,12 +100,6 @@ export function sendTextContract(state, recipientId, text) {
   };
 }
 
-/**
- * Safely parses and validates presence packets, dropping corrupted or invalid JSON packets.
- *
- * @param {object|string} envelope - Raw JSON string or object payload
- * @returns {{ success: boolean, dropped: boolean, error?: string, status?: string }} Process result
- */
 export function handleCorruptedPresence(envelope) {
   let parsed = envelope;
   if (typeof envelope === 'string') {
@@ -190,14 +124,6 @@ export function handleCorruptedPresence(envelope) {
   return { success: true, dropped: false, status: 'valid' };
 }
 
-/**
- * Defensive Bluetooth Manager state check.
- * Returns boolean false safely without throwing uncaught exceptions when permissions,
- * adapter, or LE advertiser are unavailable.
- *
- * @param {{ adapterEnabled?: boolean, hasPermission?: boolean, bluetoothLeAdvertiser?: object|null }} params
- * @returns {boolean} True if BLE manager operations can proceed safely
- */
 export function defensiveBleManagerCheck(params) {
   try {
     if (!params || typeof params !== 'object') {
@@ -219,13 +145,6 @@ export function defensiveBleManagerCheck(params) {
   }
 }
 
-/**
- * Defensive NFC Manager check.
- * Catches IllegalStateException / hardware errors and returns nfc_error event payload.
- *
- * @param {{ nfcAdapter?: object|null, activityState?: string, throwsIllegalState?: boolean }} params
- * @returns {{ success: boolean, error?: string, details?: string }} Result object
- */
 export function defensiveNfcCheck(params) {
   try {
     if (!params || typeof params !== 'object') {
@@ -251,15 +170,6 @@ export function defensiveNfcCheck(params) {
   }
 }
 
-/**
- * LRU Deduplication Cache helper.
- * Maintains max capacity history and drops duplicate message IDs.
- *
- * @param {string} msgId - Incoming message unique ID
- * @param {string[]} lruCache - Array tracking recent message IDs
- * @param {number} [maxCapacity=100] - Maximum history length
- * @returns {{ isDuplicate: boolean, action: 'drop'|'process' }} Result status
- */
 export function deduplicateMessage(msgId, lruCache, maxCapacity = 100) {
   if (!msgId || typeof msgId !== 'string') {
     return { isDuplicate: true, action: 'drop' };
@@ -270,7 +180,6 @@ export function deduplicateMessage(msgId, lruCache, maxCapacity = 100) {
 
   const existingIndex = lruCache.indexOf(msgId);
   if (existingIndex !== -1) {
-    // Duplicate detected: refresh position to end (most recent)
     lruCache.splice(existingIndex, 1);
     lruCache.push(msgId);
     return { isDuplicate: true, action: 'drop' };
@@ -278,7 +187,6 @@ export function deduplicateMessage(msgId, lruCache, maxCapacity = 100) {
 
   lruCache.push(msgId);
 
-  // Evict oldest entries if over capacity
   while (lruCache.length > maxCapacity) {
     lruCache.shift();
   }
@@ -286,12 +194,6 @@ export function deduplicateMessage(msgId, lruCache, maxCapacity = 100) {
   return { isDuplicate: false, action: 'process' };
 }
 
-/**
- * Validates Peer ID input formatting.
- *
- * @param {string} peerId - Candidate peer ID string
- * @returns {{ valid: boolean, error?: string, peerId?: string }} Validation result
- */
 export function validatePeerId(peerId) {
   if (peerId === null || peerId === undefined || typeof peerId !== 'string') {
     return { valid: false, error: 'Peer ID must be a non-empty string' };
@@ -307,12 +209,6 @@ export function validatePeerId(peerId) {
   return { valid: true, peerId: trimmed };
 }
 
-/**
- * Nullable MainActivity instance check to prevent NPE in JNI/Android context calls.
- *
- * @param {object|null|undefined} instance - MainActivity reference candidate
- * @returns {{ ready: boolean, status: string, error?: string }} Status object
- */
 export function checkMainActivityInstance(instance) {
   try {
     if (instance === null || instance === undefined) {
@@ -324,14 +220,6 @@ export function checkMainActivityInstance(instance) {
   }
 }
 
-/**
- * Handles P2P peer disconnection state update.
- * Removes disconnected MAC address from connectedAddresses state.
- *
- * @param {string[]} connectedAddresses - Array of active connected device MACs
- * @param {string} macAddress - Address of disconnected peer
- * @returns {string[]} Updated connectedAddresses array
- */
 export function handlePeerDisconnect(connectedAddresses, macAddress) {
   if (!Array.isArray(connectedAddresses)) {
     return [];
@@ -342,12 +230,6 @@ export function handlePeerDisconnect(connectedAddresses, macAddress) {
   return connectedAddresses.filter((addr) => addr !== macAddress);
 }
 
-/**
- * Workflow Helper 1: Simulates complete peer lifecycle from discovery through E2EE messaging.
- *
- * @param {{ nodeA: object, nodeB: object }} params
- * @returns {object} Simulation result
- */
 export function simulatePeerLifecycle({ nodeA, nodeB }) {
   const initNode = (spec, defaultId, defaultName, defaultMac) => ({
     id: spec?.id || defaultId,
@@ -362,7 +244,6 @@ export function simulatePeerLifecycle({ nodeA, nodeB }) {
   const stateA = initNode(nodeA, 'VX-ALICE', 'Alice', 'AA:BB:CC:DD:EE:01');
   const stateB = initNode(nodeB, 'VX-BOB', 'Bob', 'AA:BB:CC:DD:EE:02');
 
-  // 1. Discovery & GATT auto-connect
   if (!stateA.connectedAddresses.includes(stateB.mac)) {
     stateA.connectedAddresses.push(stateB.mac);
   }
@@ -372,20 +253,17 @@ export function simulatePeerLifecycle({ nodeA, nodeB }) {
   const p2pStatusA = updateP2pStatus(stateA.connectedAddresses);
   const p2pStatusB = updateP2pStatus(stateB.connectedAddresses);
 
-  // 2. Presence packet exchange
   const envA = createPresenceEnvelope(stateA.id, stateA.name, stateA.pubkey);
   const envB = createPresenceEnvelope(stateB.id, stateB.name, stateB.pubkey);
 
   const receiptAOnB = handlePresenceReceipt(stateB, envA);
   const receiptBOnA = handlePresenceReceipt(stateA, envB);
 
-  // 3. Pubkey store & chat verification
   const pubkeysStored =
     stateA.knownPubkeys.get(stateB.id) === stateB.pubkey &&
     stateB.knownPubkeys.get(stateA.id) === stateA.pubkey;
   const chatsCreated = stateA.chats.has(stateB.id) && stateB.chats.has(stateA.id);
 
-  // 4. 2-way 4-wall encrypted text messaging exchange
   const msgAtoB = sendTextContract(stateA, stateB.id, 'Hello Bob from Alice');
   const msgBtoA = sendTextContract(stateB, stateA.id, 'Hello Alice from Bob');
 
@@ -411,12 +289,6 @@ export function simulatePeerLifecycle({ nodeA, nodeB }) {
   };
 }
 
-/**
- * Workflow Helper 2: Simulates RSSI Path Loss sequence tracking and radar zone classification.
- *
- * @param {{ rssiSequence: number[] }} params
- * @returns {object} Pipeline results with distance and zone sequence
- */
 export function simulateRadarProximityPipeline({ rssiSequence }) {
   if (!Array.isArray(rssiSequence)) {
     return { results: [], distanceSequence: [], zoneSequence: [] };
@@ -445,12 +317,6 @@ export function simulateRadarProximityPipeline({ rssiSequence }) {
   };
 }
 
-/**
- * Workflow Helper 3: Simulates network link disconnection and P2P status updating.
- *
- * @param {{ initialPeers: string[], droppedMac: string }} params
- * @returns {object} Disconnection result and updated status
- */
 export function simulateNetworkDisconnection({ initialPeers, droppedMac }) {
   const peers = Array.isArray(initialPeers) ? [...initialPeers] : [];
   const initialStatus = updateP2pStatus(peers);
@@ -466,12 +332,6 @@ export function simulateNetworkDisconnection({ initialPeers, droppedMac }) {
   };
 }
 
-/**
- * Workflow Helper 4: Simulates manual Add-by-ID within BLE range.
- *
- * @param {{ manualId: string, inRangePeers: object[] }} params
- * @returns {object} Result of manual add attempt
- */
 export function simulateManualAddById({ manualId, inRangePeers }) {
   const validation = validatePeerId(manualId);
   if (!validation.valid) {
@@ -496,7 +356,6 @@ export function simulateManualAddById({ manualId, inRangePeers }) {
     };
   }
 
-  // Auto connect and trigger presence exchange
   const env = createPresenceEnvelope(
     matchedPeer.id,
     matchedPeer.name || matchedPeer.id,
@@ -514,12 +373,6 @@ export function simulateManualAddById({ manualId, inRangePeers }) {
   };
 }
 
-/**
- * Workflow Helper 5: Simulates multi-hop mesh relay forwarding with LRU duplicate drop.
- *
- * @param {{ sender: object, relay: object, recipient: object, message: object }} params
- * @returns {object} Relay forwarding result
- */
 export function simulateMeshRelay({ sender, relay, recipient, message }) {
   const relayCache = Array.isArray(relay?.lruCache) ? relay.lruCache : [];
   const recipientCache = Array.isArray(recipient?.lruCache) ? recipient.lruCache : [];
@@ -527,7 +380,6 @@ export function simulateMeshRelay({ sender, relay, recipient, message }) {
   const msgId = message?.msgId || `msg-${Date.now()}`;
   const initialTtl = message?.ttl !== undefined ? message.ttl : 32;
 
-  // Step 1: Relay checks LRU cache
   const relayCheck = deduplicateMessage(msgId, relayCache);
   if (relayCheck.isDuplicate) {
     return {
@@ -538,7 +390,6 @@ export function simulateMeshRelay({ sender, relay, recipient, message }) {
     };
   }
 
-  // Step 2: Relay decrements TTL
   const remainingTtl = initialTtl - 1;
   if (remainingTtl <= 0) {
     return {
@@ -550,7 +401,6 @@ export function simulateMeshRelay({ sender, relay, recipient, message }) {
     };
   }
 
-  // Step 3: Forward to recipient & recipient checks LRU cache
   const recipientCheck = deduplicateMessage(msgId, recipientCache);
   if (recipientCheck.isDuplicate) {
     return {
@@ -573,12 +423,6 @@ export function simulateMeshRelay({ sender, relay, recipient, message }) {
   };
 }
 
-/**
- * Workflow Helper 6: Simulates dense mesh peer environment with 10 concurrent peers.
- *
- * @param {number} [peerCount=10]
- * @returns {object} Dense mesh simulation result
- */
 export function simulateDenseMesh(peerCount = 10) {
   const peers = [];
   for (let i = 1; i <= peerCount; i++) {
@@ -595,7 +439,6 @@ export function simulateDenseMesh(peerCount = 10) {
     });
   }
 
-  // Broadcast presence between all peers
   for (const sender of peers) {
     const env = createPresenceEnvelope(sender.id, sender.name, sender.pubkey);
     for (const receiver of peers) {
@@ -605,10 +448,8 @@ export function simulateDenseMesh(peerCount = 10) {
     }
   }
 
-  // Check pubkey store integrity: every peer must have (peerCount - 1) known pubkeys
   const pubkeyStoreIntegrity = peers.every((p) => p.knownPubkeys.size === peerCount - 1);
 
-  // Build sorted radar list for Peer 1 (ascending distance)
   const peer1 = peers[0];
   const radarList = peers
     .filter((p) => p.id !== peer1.id)
@@ -632,11 +473,6 @@ export function simulateDenseMesh(peerCount = 10) {
   };
 }
 
-/**
- * Workflow Helper 7: Simulates app startup permission flow (suspension & grant recovery).
- *
- * @returns {object} Permission flow simulation result
- */
 export function applyBleDiscoveryToPeer(peer, advertisement) {
   return {
     ...peer,
@@ -674,7 +510,6 @@ export function queueOutboundMessages(queue, messages) {
 }
 
 export function simulateStartupPermissionFlow() {
-  // Phase 1: Startup without permissions
   const initialParams = {
     adapterEnabled: true,
     hasPermission: false,
@@ -682,10 +517,9 @@ export function simulateStartupPermissionFlow() {
   };
 
   const initialBleStatus = defensiveBleManagerCheck(initialParams);
-  const uiReadyWithoutCrash = true; // UI renders safely without crash
+  const uiReadyWithoutCrash = true;
   const initialAppState = initialBleStatus ? 'MESH_RUNNING' : 'UI_READY_BLE_SUSPENDED';
 
-  // Phase 2: Permission granted event fires
   const postGrantParams = {
     adapterEnabled: true,
     hasPermission: true,
@@ -706,4 +540,3 @@ export function simulateStartupPermissionFlow() {
     recoveredCleanly: !initialBleStatus && postGrantBleStatus,
   };
 }
-

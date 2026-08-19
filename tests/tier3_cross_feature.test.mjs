@@ -33,15 +33,12 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
     assert.equal(result.pubkeysStored, true);
     assert.equal(result.chatsCreated, true);
 
-    // Verify Alice pubkey store and chats
     assert.equal(result.nodeA.knownPubkeys.get(nodeB.id), nodeB.pubkey);
     assert.ok(result.nodeA.chats.has(nodeB.id));
 
-    // Verify Bob pubkey store and chats
     assert.equal(result.nodeB.knownPubkeys.get(nodeA.id), nodeA.pubkey);
     assert.ok(result.nodeB.chats.has(nodeA.id));
 
-    // Verify encrypted messaging exchange
     assert.equal(result.messaging.aToB.success, true);
     assert.equal(result.messaging.bToA.success, true);
   });
@@ -52,12 +49,10 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
 
     assert.equal(results.length, 3);
 
-    // -40 dBm -> immediate <1m
     assert.ok(results[0].distance < 1.0, `Expected distance < 1m for -40 dBm, got ${results[0].distance}`);
     assert.equal(results[0].zone, 'immediate');
     assert.equal(results[0].label, '<1m');
 
-    // -65 dBm -> near 1-5m
     assert.ok(
       results[1].distance >= 1.0 && results[1].distance <= 5.0,
       `Expected distance 1-5m for -65 dBm, got ${results[1].distance}`
@@ -65,7 +60,6 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
     assert.equal(results[1].zone, 'near');
     assert.equal(results[1].label, '1-5m');
 
-    // -90 dBm -> far >5m
     assert.ok(results[2].distance > 5.0, `Expected distance > 5m for -90 dBm, got ${results[2].distance}`);
     assert.equal(results[2].zone, 'far');
     assert.equal(results[2].label, '>5m');
@@ -76,16 +70,13 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
   it('Test 3.3: Network Disconnection & P2P indicator update when GATT link drops', () => {
     const initialPeers = ['AA:BB:CC:DD:EE:01', 'AA:BB:CC:DD:EE:02'];
 
-    // Initial state check
     assert.equal(updateP2pStatus(initialPeers), 'CONNECTED');
 
-    // Drop first device
     const resDrop1 = simulateNetworkDisconnection({ initialPeers, droppedMac: 'AA:BB:CC:DD:EE:01' });
     assert.equal(resDrop1.initialStatus, 'CONNECTED');
     assert.deepEqual(resDrop1.remainingPeers, ['AA:BB:CC:DD:EE:02']);
     assert.equal(resDrop1.finalStatus, 'CONNECTED', 'Should remain CONNECTED while 1 peer is connected');
 
-    // Drop second device -> 0 peers
     const resDrop2 = simulateNetworkDisconnection({
       initialPeers: resDrop1.remainingPeers,
       droppedMac: 'AA:BB:CC:DD:EE:02',
@@ -105,7 +96,6 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
       },
     ];
 
-    // Case 1: Manual ID matches peer in BLE range
     const resMatch = simulateManualAddById({ manualId: 'VX-TARGET-01', inRangePeers });
     assert.equal(resMatch.valid, true);
     assert.equal(resMatch.foundInRange, true);
@@ -114,7 +104,6 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
     assert.ok(resMatch.presenceEnvelope);
     assert.equal(resMatch.presenceEnvelope.senderId, 'VX-TARGET-01');
 
-    // Case 2: Manual ID not in BLE range
     const resOutOfRange = simulateManualAddById({ manualId: 'VX-OUT-OF-RANGE', inRangePeers });
     assert.equal(resOutOfRange.valid, true);
     assert.equal(resOutOfRange.foundInRange, false);
@@ -135,7 +124,6 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
       ciphertext: 'enc-payload-bytes',
     };
 
-    // First relay pass: forwarded cleanly to recipient
     const res1 = simulateMeshRelay({ sender, relay, recipient, message });
     assert.equal(res1.relayed, true);
     assert.equal(res1.duplicateDropped, false);
@@ -143,7 +131,6 @@ describe('Tier 3: Cross-Feature Integration Scenarios Verification', () => {
     assert.equal(res1.ttlRemaining, 31);
     assert.equal(recipient.receivedMessages.length, 1);
 
-    // Second relay pass with same msgId (duplicate arrival at relay): dropped by relay LRU cache
     const resDuplicate = simulateMeshRelay({ sender, relay, recipient, message });
     assert.equal(resDuplicate.relayed, false);
     assert.equal(resDuplicate.duplicateDropped, true);

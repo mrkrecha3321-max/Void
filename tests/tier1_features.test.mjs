@@ -20,7 +20,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
 
     function simulatePeerDiscovery(peer) {
       activeState.discoveredPeers.set(peer.address, peer);
-      // GATT Auto-Connect logic contract trigger:
       if (!activeState.connectedGattAddresses.has(peer.address)) {
         activeState.autoConnectLog.push({
           action: 'connectGatt',
@@ -57,7 +56,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
     assert.equal(validEnvelope.recipientId, '*');
     assert.equal(validEnvelope.plainPresenceName, 'Bob Node');
 
-    // Negative tests for invalid structure
     assert.equal(validatePresenceEnvelope(null), false);
     assert.equal(validatePresenceEnvelope({ ...validEnvelope, msgType: 'text' }), false);
     assert.equal(validatePresenceEnvelope({ ...validEnvelope, senderId: '' }), false);
@@ -75,7 +73,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
     assert.equal(validateX25519Pubkey(invalidLongKey), false, '64-byte key should be invalid');
     assert.equal(validateX25519Pubkey(''), false, 'Empty key string should be invalid');
 
-    // Storage test in knownPubkeys map
     const knownPubkeys = new Map();
     const nodeId = 'VX-NODE-KEY-TEST';
     knownPubkeys.set(nodeId, valid32ByteKey);
@@ -85,13 +82,11 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
   });
 
   it('Test 1.9: Auto chat creation logic contract on presence receipt for both sender and receiver', () => {
-    // Node A state
     const nodeAState = {
       knownPubkeys: new Map(),
       chats: new Map(),
     };
 
-    // Node B state
     const nodeBState = {
       knownPubkeys: new Map(),
       chats: new Map(),
@@ -103,13 +98,11 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
     const envelopeFromA = createPresenceEnvelope('VX-NODE-A', 'Alice', pubkeyA);
     const envelopeFromB = createPresenceEnvelope('VX-NODE-B', 'Bob', pubkeyB);
 
-    // Node B receives presence from Node A
     const resultB = handlePresenceReceipt(nodeBState, envelopeFromA);
     assert.ok(resultB, 'Node B should successfully process Node A presence');
     assert.ok(nodeBState.chats.has('VX-NODE-A'), 'Chat with Node A should be created in Node B chats');
     assert.equal(nodeBState.chats.get('VX-NODE-A').name, 'Alice');
 
-    // Node A receives presence from Node B
     const resultA = handlePresenceReceipt(nodeAState, envelopeFromB);
     assert.ok(resultA, 'Node A should successfully process Node B presence');
     assert.ok(nodeAState.chats.has('VX-NODE-B'), 'Chat with Node B should be created in Node A chats');
@@ -124,7 +117,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
     const recipientId = 'VX-RECIPIENT-99';
     const text = 'Szyfrowana wiadomosc testowa';
 
-    // 1. Attempt send_text without storing pubkey -> MUST FAIL
     const failedResult = sendTextContract(state, recipientId, text);
     assert.equal(failedResult.success, false);
     assert.ok(
@@ -132,11 +124,9 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
       `Error message should state recipient pubkey is unknown. Got: ${failedResult.error}`
     );
 
-    // 2. Store recipient pubkey
     const validPubkey = Buffer.alloc(32, 0xcc).toString('base64');
     state.knownPubkeys.set(recipientId, validPubkey);
 
-    // 3. Attempt send_text with stored pubkey -> MUST SUCCEED
     const successResult = sendTextContract(state, recipientId, text);
     assert.equal(successResult.success, true);
     assert.equal(successResult.payload.recipientId, recipientId);
@@ -145,21 +135,18 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
   });
 
   it('Test 1.11: Path Loss RSSI distance calculation (-40 dBm, -55 dBm, -80 dBm)', () => {
-    // 1. Close-range (-40 dBm) -> distance < 1.0m
     const distNear = calculateRssiDistance(-40);
     assert.ok(
       distNear < 1.0,
       `Distance for -40 dBm should be < 1.0m. Got: ${distNear}m`
     );
 
-    // 2. Mid-range (-55 dBm) -> ~0.6m - 1.5m
     const distMid = calculateRssiDistance(-55);
     assert.ok(
       distMid >= 0.6 && distMid <= 1.5,
       `Distance for -55 dBm should be between 0.6m and 1.5m. Got: ${distMid}m`
     );
 
-    // 3. Far-range (-80 dBm) -> > 10m
     const distFar = calculateRssiDistance(-80);
     assert.ok(
       distFar > 10.0,
@@ -175,7 +162,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
       'Empty connected_addresses should yield DISCONNECTED'
     );
 
-    // Device connects
     connectedAddresses = ['AA:BB:CC:DD:EE:FF'];
     assert.equal(
       updateP2pStatus(connectedAddresses),
@@ -183,7 +169,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
       'Active connected_addresses should yield CONNECTED'
     );
 
-    // Multiple devices connect
     connectedAddresses.push('11:22:33:44:55:66');
     assert.equal(
       updateP2pStatus(connectedAddresses),
@@ -191,7 +176,6 @@ describe('Tier 1: Feature Logic & Network Protocol Verification', () => {
       'Multiple connected_addresses should yield CONNECTED'
     );
 
-    // All devices disconnect
     connectedAddresses = [];
     assert.equal(
       updateP2pStatus(connectedAddresses),

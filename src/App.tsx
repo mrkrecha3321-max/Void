@@ -73,7 +73,6 @@ function App() {
           sendNotification({ title: `Wiadomość od ${payload.peerId.slice(0, 11)}…`, body: payload.text });
         }
       } catch {
-        // A malformed preference must not block message delivery.
       }
     });
     return () => { subscription.then(unlisten => unlisten?.()); };
@@ -105,7 +104,6 @@ function App() {
           });
         }
       } catch {
-        // The in-app SOS banner remains visible even with malformed preferences.
       }
     });
     return () => {
@@ -265,7 +263,6 @@ function App() {
         </div>
       )}
 
-      {/* Incoming SOS Banner Overlay */}
       <AnimatePresence>
         {incomingSos && (
           <motion.div
@@ -312,12 +309,10 @@ function App() {
       </AnimatePresence>
 
       <main className="flex-1 min-h-0 min-w-0 flex overflow-hidden relative">
-        {/* Left Sidebar (Desktop: visible always, Mobile: visible if no active chat) */}
         <div 
           className={`flex-shrink-0 w-full md:w-[360px] lg:w-[400px] flex flex-col border-r border-border/10 bg-background transition-transform
           ${activeChat ? 'hidden md:flex' : 'flex'}
         `}>
-          {/* Main List Area */}
           <div className="flex-1 overflow-hidden relative flex flex-col">
             <AnimatePresence mode="wait">
               <motion.div
@@ -333,18 +328,15 @@ function App() {
             </AnimatePresence>
           </div>
           
-          {/* Mobile Bottom Nav */}
           <div className="md:hidden">
             <BottomNav activeTab={activeTab} onTabChange={setActiveTab} />
           </div>
         </div>
 
-        {/* Right Column (Desktop: visible always, Mobile: visible if active chat) */}
         <div 
           className={`flex-1 min-h-0 min-w-0 flex flex-col relative overflow-hidden bg-background/50
           ${!activeChat ? 'hidden md:flex' : 'flex'}
         `}>
-          {/* Top Global Bar for Desktop when no chat is open, or combined in ChatView header */}
           {!activeChat && (
              <div className="h-16 border-b border-border/10 flex items-center justify-end px-4 bg-background">
                 <button 
@@ -387,7 +379,6 @@ function App() {
         </div>
       </main>
 
-      {/* Desktop Settings Modal / Drawer (Reusing MenuScreen logic) */}
       <AnimatePresence>
         {showSettings && (
           <>

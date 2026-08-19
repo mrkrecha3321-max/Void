@@ -28,13 +28,13 @@ object NfcManager {
 
     @JvmStatic
     fun enableForegroundDispatch(activity: MainActivity) {
-        val adapter = nfcAdapter ?: return  // no NFC hardware — silent skip, no crash
+        val adapter = nfcAdapter ?: return
 
         val intent = Intent(activity, activity.javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
         val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
         val pendingIntent = PendingIntent.getActivity(activity, 0, intent, flags)
 
-        // Accept ALL NFC intents — Samsung may deliver TAG_DISCOVERED instead of NDEF_DISCOVERED
+        // Keep all three filters because Samsung devices may report TAG_DISCOVERED.
         val filters = arrayOf(
             IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED),
             IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED),
@@ -59,7 +59,6 @@ object NfcManager {
 
         when (action) {
             NfcAdapter.ACTION_NDEF_DISCOVERED -> {
-                // Try getting NDEF messages directly from the intent first
                 @Suppress("DEPRECATION")
                 val rawMsgs = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES)
                 if (rawMsgs != null && rawMsgs.isNotEmpty()) {
@@ -72,19 +71,16 @@ object NfcManager {
                         }
                     }
                 }
-                // Also try reading directly from the tag (physical/Samsung fallback)
                 readTagFromIntent(intent)
             }
 
             NfcAdapter.ACTION_TAG_DISCOVERED,
             NfcAdapter.ACTION_TECH_DISCOVERED -> {
-                // Try to read NDEF from the physical tag
                 readTagFromIntent(intent)
             }
         }
     }
 
-    /** Read NDEF message from the physical NFC tag embedded in the Intent */
     private fun readTagFromIntent(intent: Intent) {
         try {
             @Suppress("DEPRECATION")
@@ -119,13 +115,11 @@ object NfcManager {
 
             if (record.tnf == NdefRecord.TNF_WELL_KNOWN &&
                 record.type.contentEquals(NdefRecord.RTD_TEXT)) {
-                // Proper NDEF Text record — strip status + language code
                 val langLen = (payload[0].toInt() and 0x3F)
                 val start   = 1 + langLen
                 if (start >= payload.size) return null
                 String(payload, start, payload.size - start, Charsets.UTF_8)
             } else {
-                // Unknown record type — try raw UTF-8 as fallback
                 String(payload, Charsets.UTF_8)
             }
         } catch (e: Throwable) {
@@ -133,7 +127,6 @@ object NfcManager {
         }
     }
 
-    /** Write our profile to a physical NFC tag */
     @JvmStatic
     fun writeProfileTag(tag: Tag, payload: String): Boolean {
         return try {

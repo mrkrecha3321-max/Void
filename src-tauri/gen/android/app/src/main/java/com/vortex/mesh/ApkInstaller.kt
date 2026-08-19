@@ -11,12 +11,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import java.io.File
 
-/**
- * Installs a downloaded VOID APK without depending on a live Activity.
- * The previous MainActivity.instance latch failed whenever the process
- * stayed alive (foreground service) after the Activity was destroyed,
- * and also swallowed path/permission errors as "MainActivity unavailable".
- */
+// Use app context because the foreground service can outlive MainActivity.
 object ApkInstaller {
     private const val TAG = "VoidUpdater"
     private const val PREFS = "void_updater"

@@ -16,15 +16,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 
-/**
- * Same-process connectedDevice foreground service.
- *
- * Tauri/Rust/WebView live in this process. A separate `:mesh` process could not
- * reach MeshState or the encrypted vault, so the officially supported way to
- * keep scan/advertise/GATT alive is a connectedDevice FGS in the app process.
- * The service does not try to start from boot or otherwise bypass Android 8–16
- * background limits.
- */
+// Keep this service in the app process so it can access MeshState and the encrypted vault.
 class MeshForegroundService : Service() {
     private var receiverRegistered = false
 

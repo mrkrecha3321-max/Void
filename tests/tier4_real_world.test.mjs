@@ -16,10 +16,8 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
     assert.equal(pubkeyStoreIntegrity, true, 'Each peer must independently store pubkeys of all other 9 peers');
     assert.equal(nonBlocking, true, 'Dense mesh broadcast and radar sorting must complete without blocking');
 
-    // Radar proximity list for Peer 1 should contain 9 target peers
     assert.equal(sortedRadarList.length, 9);
 
-    // Verify radar proximity list is strictly sorted ascending by distance
     for (let i = 0; i < sortedRadarList.length - 1; i++) {
       assert.ok(
         sortedRadarList[i].distance <= sortedRadarList[i + 1].distance,
@@ -55,14 +53,12 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
       pubkey: Buffer.alloc(32, 84).toString('base64'),
     };
 
-    // 1. Initial lifecycle setup
     const session = simulatePeerLifecycle({ nodeA, nodeB });
     assert.equal(session.success, true);
 
     const aliceState = session.nodeA;
     const bobState = session.nodeB;
 
-    // 2. Multi-message conversation sequence
     const messages = [
       { sender: 'A', text: 'Hey Bob, is the BLE mesh operational?' },
       { sender: 'B', text: 'Confirmed Alice, link quality is optimal.' },
@@ -87,7 +83,6 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
 
     assert.equal(exchangeHistory.length, 5);
 
-    // 3. Verify key store integrity after session
     assert.equal(
       aliceState.knownPubkeys.get(bobState.id),
       nodeB.pubkey,
@@ -99,7 +94,6 @@ describe('Tier 4: Real-World Application Scenarios Verification', () => {
       "Bob's key store for Alice must remain unchanged and valid"
     );
 
-    // 4. Verify chat instances exist for both users
     assert.ok(aliceState.chats.has(bobState.id));
     assert.ok(bobState.chats.has(aliceState.id));
   });
