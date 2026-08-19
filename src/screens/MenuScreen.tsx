@@ -41,7 +41,6 @@ const MenuScreen: React.FC<Props> = ({
   meshError,
   onPanic,
 }) => {
-  // Settings State
   const [showSettings, setShowSettings] = useState(false);
   const { settings, updateSetting } = useSettings();
   const { profile, updateProfile } = useProfile();
@@ -55,7 +54,6 @@ const MenuScreen: React.FC<Props> = ({
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupError, setBackupError] = useState('');
 
-  // SOS Modal State
   const [showSos, setShowSos] = useState(false);
   const [sosName, setSosName] = useState('');
   const [sosDesc, setSosDesc] = useState('');
@@ -211,7 +209,6 @@ const MenuScreen: React.FC<Props> = ({
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background relative overflow-hidden">
-      {/* Main Menu Header */}
       <div className="flex items-center justify-between px-6 py-4 pt-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Menu</h1>
         <button 
@@ -223,7 +220,6 @@ const MenuScreen: React.FC<Props> = ({
       </div>
 
       <div className="flex-1 overflow-y-auto pb-24 no-scrollbar">
-        {/* Profile */}
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -239,7 +235,6 @@ const MenuScreen: React.FC<Props> = ({
           </div>
         </motion.div>
 
-        {/* P2P Status */}
         <div className="px-6 py-3 border-b border-border/50 bg-secondary/10 flex items-center gap-2.5 text-sm font-medium">
           <span className={`w-2.5 h-2.5 rounded-full ${meshError ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]' : connected ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : 'bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.5)] animate-pulse'}`} />
           <span className="text-muted-foreground">
@@ -251,7 +246,6 @@ const MenuScreen: React.FC<Props> = ({
           </span>
         </div>
 
-        {/* SOS Action */}
         <div className="px-6 mt-6 mb-2 text-xs font-bold uppercase tracking-widest text-red-500">
           Tryb Ratunkowy
         </div>
@@ -271,7 +265,6 @@ const MenuScreen: React.FC<Props> = ({
           </div>
         </motion.div>
 
-        {/* About */}
         <div className="px-6 pt-6 pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
           O aplikacji
         </div>
@@ -289,7 +282,6 @@ const MenuScreen: React.FC<Props> = ({
 
         <div className="h-px bg-border/50 mx-6 my-4" />
 
-        {/* Security section (Panic) */}
         <div className="px-6 pt-2 pb-2 text-xs font-bold uppercase tracking-widest text-red-500/80">
           Strefa zagrożenia
         </div>
@@ -313,7 +305,6 @@ const MenuScreen: React.FC<Props> = ({
         </motion.div>
       </div>
 
-      {/* Settings Sub-Screen */}
       <AnimatePresence>
         {showSettings && (
           <motion.div
@@ -323,7 +314,6 @@ const MenuScreen: React.FC<Props> = ({
             transition={{ type: "spring", damping: 25, stiffness: 200 }}
             className="absolute inset-0 z-40 bg-background flex flex-col h-full"
           >
-            {/* Settings Header */}
             <div className="flex items-center gap-3 px-4 py-3 pt-safe bg-background border-b border-border/50 sticky top-0 z-10">
               <button 
                 className="p-2 -ml-2 rounded-full text-accent hover:bg-secondary transition-colors" 
@@ -515,7 +505,6 @@ const MenuScreen: React.FC<Props> = ({
         )}
       </AnimatePresence>
 
-      {/* Encrypted identity backup */}
       <AnimatePresence>
         {showBackup && (
           <div className="absolute inset-0 z-50 flex items-center justify-center p-4">
@@ -576,7 +565,6 @@ const MenuScreen: React.FC<Props> = ({
         )}
       </AnimatePresence>
 
-      {/* SOS Modal */}
       <AnimatePresence>
         {showSos && (
           <div className="absolute inset-0 z-50 flex items-end justify-center sm:items-center">

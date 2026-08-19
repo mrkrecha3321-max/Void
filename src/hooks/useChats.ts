@@ -177,7 +177,6 @@ export function useChats() {
           };
           if (preferences.autoDestruct) finalMessages = pruneExpiredMessages(restoredMessages);
         } catch {
-          // Keep validated history when preferences are malformed.
         }
         setChats(restoredChats);
         setMessages(finalMessages);
@@ -230,7 +229,6 @@ export function useChats() {
           persistedMessages = pruneExpiredMessages(messages);
         }
       } catch {
-        // Invalid local UI preferences do not block encrypted persistence.
       }
       void saveChatState({ chats: chats.slice(0, 500), messages: persistedMessages }).then(async () => {
         const receivedIds = Object.values(persistedMessages)
@@ -257,7 +255,6 @@ export function useChats() {
           setMessages(previous => pruneExpiredMessages(previous));
         }
       } catch {
-        // Ignore malformed UI preferences.
       }
     }, 60_000);
     return () => clearInterval(interval);
@@ -356,7 +353,6 @@ export function useChats() {
     const chat = chatsRef.current.find(c => c.id === chatId);
     const recipientId = chat?.peerId || chatId;
     
-    // We create a temporary message with a local ID
     const tempId = localId('pending-message');
     const msg: Message = {
       id: tempId,

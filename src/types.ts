@@ -45,7 +45,6 @@ export interface Message {
   error?: string;
 }
 
-// IPC Event Payload Types
 export interface MessageReceivedPayload {
   id: string;
   peerId: string;
@@ -118,7 +117,6 @@ export interface SosReceivedPayload {
   timestamp: number;
 }
 
-// Legacy & UI Component Types & Aliases
 export type TabType = 'chats' | 'contacts' | 'menu';
 export type Tab = TabType;
 

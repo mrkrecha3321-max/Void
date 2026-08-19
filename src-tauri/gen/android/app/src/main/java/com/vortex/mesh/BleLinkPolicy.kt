@@ -1,6 +1,5 @@
 package com.vortex.mesh
 
-/** Pure BLE policy used by the runtime and JVM unit tests. */
 object BleLinkPolicy {
     const val ATT_OVERHEAD = 3
     const val HEADER_V1 = 5

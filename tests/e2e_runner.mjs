@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Discover all test files matching tests/*.test.mjs
 const testFiles = fs.readdirSync(__dirname)
   .filter((f) => f.endsWith('.test.mjs'))
   .sort()
@@ -23,7 +22,6 @@ console.log('-------------------------------------------------------------------
 const startTime = Date.now();
 const testStream = run({ files: testFiles });
 
-// Track summary statistics
 let totalTests = 0;
 let passedTests = 0;
 let failedTests = 0;
@@ -34,7 +32,6 @@ const tierStats = {};
 
 testStream.on('test:pass', (data) => {
   if (data.nesting === 1) {
-    // Leaf test case
     totalTests++;
     passedTests++;
     const fileKey = path.basename(data.file || 'unknown');
@@ -58,10 +55,8 @@ testStream.on('test:fail', (data) => {
 });
 
 testStream.on('test:dequeue', (data) => {
-  // Can be used for detailed event logging if needed
 });
 
-// Pipe standard spec reporter output to stdout
 testStream.compose(spec).pipe(process.stdout);
 
 testStream.on('end', () => {

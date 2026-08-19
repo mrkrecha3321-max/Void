@@ -1,5 +1,4 @@
-// Most JNI: callbacki wywolywane z Kotlina (BleManager.kt, NfcManager.kt -> NativeBridge.kt)
-// oraz przechowanie AppHandle, zeby moc emitowac zdarzenia Tauri z watku JNI.
+// JNI callbacks arrive from Kotlin and emit Tauri events through the stored AppHandle.
 
 use once_cell::sync::OnceCell;
 use std::sync::Mutex;
@@ -7,8 +6,7 @@ use tauri::{AppHandle, Emitter};
 
 pub static APP_HANDLE: OnceCell<Mutex<Option<AppHandle>>> = OnceCell::new();
 
-/// Globalny ClassLoader apki — potrzebny żeby JNI na wątkach roboczych
-/// mogło znajdować klasy com.vortex.mesh.* (które nie są w systemowym loaderze).
+/// Worker threads must use the app ClassLoader to resolve com.vortex.mesh classes.
 #[cfg(target_os = "android")]
 pub static CLASS_LOADER: OnceCell<Mutex<Option<jni::objects::GlobalRef>>> = OnceCell::new();
 
@@ -56,14 +54,12 @@ mod android {
         let short_id = jstr(&mut env, &short_id);
         let name = jstr(&mut env, &name);
 
-        // Record the peer's BLE address so we can find it later by short_id
         if let Some(cell) = super::APP_HANDLE.get() {
             if let Ok(guard) = cell.lock() {
                 if let Some(app) = guard.as_ref() {
                     let state = app.state::<crate::mesh::MeshState>();
                     state.record_discovered_peer(&address, &short_id, &name, rssi);
-                    // NOTE: DO NOT call send_presence here — GATT is not yet established
-                    // send_presence is called in onPeerConnected after connectGatt succeeds
+                    // Send presence only after onPeerConnected confirms the GATT link.
                 }
             }
         }
@@ -308,16 +304,14 @@ mod android {
     }
 }
 
-// ---- Rust -> Kotlin: wywolania na BleManager (JVM static, dzieki @JvmStatic) ----
+// Rust calls the @JvmStatic BleManager API through this module.
 #[cfg(target_os = "android")]
 pub mod calls {
     use jni::objects::{JClass, JString, JValue};
     use jni::JNIEnv;
     use jni::JavaVM;
 
-    /// Ładuje klasę przez ClassLoader apki (działa na wątkach roboczych).
-    /// Bez tego JNI rzuca ClassNotFoundException na Thread-N bo
-    /// domyślny loader nie zna klas com.vortex.mesh.*
+    /// Load app classes through the stored ClassLoader on worker threads.
     fn find_app_class<'a>(env: &mut JNIEnv<'a>, class_name: &str) -> Result<JClass<'a>, String> {
         let cell = super::CLASS_LOADER
             .get()
@@ -326,7 +320,6 @@ pub mod calls {
         let loader_ref = guard
             .as_ref()
             .ok_or("ClassLoader GlobalRef is None".to_string())?;
-        // Konwertuj slash-notation na dot-notation: com/vortex/mesh/BleManager -> com.vortex.mesh.BleManager
         let dot_name = class_name.replace('/', ".");
         let class_name_j = env.new_string(&dot_name).map_err(|e| e.to_string())?;
         let result = env

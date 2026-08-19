@@ -24,8 +24,7 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
   const nfcUnlistenRef = useRef<(() => void) | null>(null);
   const nfcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Listen for nfc_tag_read events from native NfcManager.kt when modal is open.
-  // Web NFC API (NDEFReader) does NOT work in Tauri WebView — we use Tauri events instead.
+  // Tauri WebView does not support Web NFC; keep this native event bridge.
   useEffect(() => {
     if (!showNfcModal) {
       if (nfcTimerRef.current) {
@@ -41,7 +40,6 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
 
     setNfcStatus('Zbliż telefon do podpisanego tagu VOID2...');
 
-    // Native NFC → Rust JNI → validated protocol-v2 contact card.
     listen<{ payload: string }>('nfc_tag_read', async (event) => {
       try {
         const raw: string =
@@ -104,7 +102,6 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background relative">
-      {/* Header */}
       <div className="flex items-center justify-between px-6 py-4 pt-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Kontakty</h1>
         <div className="flex gap-2">
@@ -125,7 +122,6 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         </div>
       </div>
 
-      {/* My Node ID Card */}
       <div className="mx-4 mb-4 mt-2 bg-secondary/40 border border-border/60 rounded-2xl px-4 py-3 flex items-center justify-between gap-3">
         <div className="flex flex-col min-w-0">
           <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground mb-0.5">Mój Node ID</span>
@@ -192,7 +188,6 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         </div>
       )}
 
-      {/* Add by ID Modal */}
       <AnimatePresence>
         {showIdModal && (
           <motion.div
@@ -248,7 +243,6 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         )}
       </AnimatePresence>
 
-      {/* NFC Modal Overlay */}
       <AnimatePresence>
         {showNfcModal && (
           <motion.div

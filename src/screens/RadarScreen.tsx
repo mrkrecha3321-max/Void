@@ -13,19 +13,13 @@ interface Props {
   onStartChat: (peerId: string, peerName: string) => void;
 }
 
-/**
- * Log-distance Path Loss Model:
- * d = 10 ^ ((MeasuredPower - RSSI) / (10 * n))
- * MeasuredPower = -59 dBm (1 meter calibration)
- * n = 2.0 (Path Loss exponent)
- */
 export const calculateDistance = (
   lat1: number,
   lon1: number,
   lat2: number,
   lon2: number
 ): number => {
-  const R = 6371e3; // Earth radius in metres
+  const R = 6371e3;
   const p1 = (lat1 * Math.PI) / 180;
   const p2 = (lat2 * Math.PI) / 180;
   const dp = ((lat2 - lat1) * Math.PI) / 180;
@@ -46,7 +40,7 @@ export const calculateDistanceRssi = (
   n: number = 2.0
 ): number => {
   if (rssi === undefined || rssi === null || rssi === 0) {
-    return 5.0; // Default distance if RSSI unavailable
+    return 5.0;
   }
   const ratio = (measuredPower - rssi) / (10 * n);
   const distance = Math.pow(10, ratio);
@@ -172,7 +166,6 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
     };
   }, [scanning, sharingLocation, peers, locationRecipients]);
 
-  // Widoczni ludzie posortowani po odległości
   const visiblePeers = peers
     .filter(p => scanning && isPeerVisibleOnRadar(p, radarNow))
     .map(p => {
@@ -215,7 +208,6 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
       )}
 
       <div className="flex-1 overflow-y-auto relative z-0 flex flex-col">
-        {/* Radar Animation Area */}
         <div className="relative w-full h-64 flex items-center justify-center shrink-0 border-b border-border/30 overflow-hidden">
           <div className="absolute inset-0 bg-gradient-to-b from-accent/5 to-transparent pointer-events-none" />
 

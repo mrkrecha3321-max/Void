@@ -1,6 +1,3 @@
-//! Deterministic helpers for outbox retry and peer-link status.
-//! These functions have no I/O so they can be unit-tested without BLE.
-
 pub const MAX_OUTBOX_ATTEMPTS: u32 = 24;
 pub const MAX_TRANSPORT_ATTEMPTS_PER_MINUTE: usize = 30;
 pub const TRANSPORT_RATE_WINDOW_MS: u64 = 60_000;
