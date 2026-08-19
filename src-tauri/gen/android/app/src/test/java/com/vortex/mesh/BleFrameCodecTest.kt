@@ -14,6 +14,8 @@ class BleFrameCodecTest {
         val decoded = frames.map { frame ->
             BleFrameCodec.decode(frame) ?: throw AssertionError("Generated frame must decode")
         }
+        assertTrue(decoded.all { it.version == 1 })
+        assertTrue(decoded.all { it.payload.size <= BleFrameCodec.CHUNK_SIZE })
         assertTrue(decoded.all { it.messageId == 0xBEEF })
         assertEquals(frames.size, decoded.first().totalChunks)
         assertEquals((0 until frames.size).toList(), decoded.map { it.chunkIndex })
@@ -67,6 +69,18 @@ class BleFrameCodecTest {
                 .toByteArray()
             assertArrayEquals(payload, restored)
         }
+    }
+
+    @Test
+    fun defaultOutboundEncodingMatchesRelease021() {
+        val payload = ByteArray(33) { index -> index.toByte() }
+        val frames = BleFrameCodec.encode(payload, 0x1234)
+
+        assertEquals(3, frames.size)
+        assertTrue(frames.all { it[0] == 0.toByte() })
+        assertTrue(frames.all { it.size <= BleFrameCodec.HEADER_SIZE_V1 + BleFrameCodec.CHUNK_SIZE })
+        assertEquals(listOf(16, 16, 1), frames.map { BleFrameCodec.decode(it)!!.payload.size })
+        assertTrue(frames.mapNotNull(BleFrameCodec::decode).all { it.version == 1 })
     }
 
     @Test

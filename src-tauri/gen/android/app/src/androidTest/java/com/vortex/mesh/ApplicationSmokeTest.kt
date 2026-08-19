@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -19,9 +20,10 @@ class ApplicationSmokeTest {
     @Test
     fun productionFrameCodecWorksOnAndroidRuntime() {
         val payload = "signed-envelope".toByteArray()
-        val frames = BleFrameCodec.encode(payload, 42, 185)
+        val frames = BleFrameCodec.encode(payload, 42)
         val decoded = frames.mapNotNull(BleFrameCodec::decode)
         assertEquals(1, decoded.size)
+        assertTrue(decoded.all { it.version == 1 })
         assertEquals("signed-envelope", String(decoded.first().payload, Charsets.UTF_8))
     }
 }
