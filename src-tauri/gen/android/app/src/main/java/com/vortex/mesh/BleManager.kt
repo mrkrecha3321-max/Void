@@ -111,9 +111,6 @@ object BleManager {
         hasPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION)
     }
 
-    private fun mtuFor(address: String): Int =
-        negotiatedMtu[address] ?: BleLinkPolicy.DEFAULT_MTU
-
     @JvmStatic
     fun init(ctx: Context, nodeId: String, name: String) {
         try {
@@ -746,12 +743,12 @@ object BleManager {
                 return false
             }
 
-            val frames = BleFrameCodec.encode(bytes, allocateMessageId(), mtuFor(deviceAddress))
+            val frames = BleFrameCodec.encode(bytes, allocateMessageId())
             if (frames.isEmpty()) return false
             val queue = writeQueues.computeIfAbsent(deviceAddress) { BleOutboundQueue() }
             val status = queue.enqueue(meshMsgId, frames)
             if (status == EnqueueStatus.REJECTED) return false
-            Log.i(TAG, "queued meshMsgId=$meshMsgId frames=${frames.size} mtu=${mtuFor(deviceAddress)}")
+            Log.i(TAG, "queued meshMsgId=$meshMsgId frames=${frames.size} protocol=v1 chunkBytes=${BleFrameCodec.CHUNK_SIZE}")
             mainHandler.post { drainWriteQueue(deviceAddress) }
             true
         } catch (error: Throwable) {
