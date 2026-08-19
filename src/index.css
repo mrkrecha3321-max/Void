@@ -70,12 +70,20 @@ body {
   scrollbar-width: none;
 }
 
-/* Tailwind base safe areas */
+/*
+ * Tailwind base safe areas.
+ *
+ * On iOS the values come from env(safe-area-inset-*). On Android those env()
+ * variables are always 0, so the Kotlin layer (MainActivity) injects the real
+ * window insets — including the on-screen keyboard (IME) — as
+ * --safe-area-inset-* CSS variables. We pick whichever value is larger so the
+ * same classes work correctly on both platforms.
+ */
 @supports (padding-bottom: env(safe-area-inset-bottom)) {
   .pb-safe {
-    padding-bottom: env(safe-area-inset-bottom);
+    padding-bottom: max(env(safe-area-inset-bottom), var(--safe-area-inset-bottom, 0px));
   }
   .pt-safe {
-    padding-top: env(safe-area-inset-top);
+    padding-top: max(env(safe-area-inset-top), var(--safe-area-inset-top, 0px));
   }
 }

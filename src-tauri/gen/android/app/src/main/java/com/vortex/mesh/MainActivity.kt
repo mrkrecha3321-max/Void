@@ -4,9 +4,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -31,6 +34,51 @@ class MainActivity : TauriActivity() {
       android.util.Log.w("MainActivity", "NfcManager.init failed", error)
     }
     requestBlePermissionsIfNeeded()
+  }
+
+  /**
+   * Wry/Tauri creates the WebView asynchronously and passes it here.
+   * We forward Android's window insets (system bars, display cutout and the
+   * on-screen keyboard/IME) into CSS variables so the web UI can pad its
+   * safe areas. On Android `env(safe-area-inset-*)` is always 0, and with an
+   * edge-to-edge window the keyboard would otherwise cover the message input.
+   */
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    ViewCompat.setOnApplyWindowInsetsListener(webView) { _, windowInsets ->
+      applySafeAreaInsets(webView, windowInsets)
+      windowInsets
+    }
+    // The very first insets pass can run before the page's DOM is ready, so
+    // re-apply shortly after startup to make sure the variables land on the
+    // loaded document. The keyboard case is covered by the listener above,
+    // which fires again whenever the IME opens or closes.
+    webView.post { applySafeAreaInsets(webView, ViewCompat.getRootWindowInsets(webView)) }
+    webView.postDelayed({ applySafeAreaInsets(webView, ViewCompat.getRootWindowInsets(webView)) }, 500)
+  }
+
+  private fun applySafeAreaInsets(webView: WebView, windowInsets: WindowInsetsCompat?) {
+    if (windowInsets == null) return
+    val safe = windowInsets.getInsets(
+      WindowInsetsCompat.Type.systemBars()
+        or WindowInsetsCompat.Type.displayCutout()
+        or WindowInsetsCompat.Type.ime()
+    )
+    val density = webView.resources.displayMetrics.density
+    val top = safe.top / density
+    val right = safe.right / density
+    val bottom = safe.bottom / density
+    val left = safe.left / density
+    val script = """
+      (function () {
+        var style = document.documentElement.style;
+        style.setProperty('--safe-area-inset-top', '${top}px');
+        style.setProperty('--safe-area-inset-right', '${right}px');
+        style.setProperty('--safe-area-inset-bottom', '${bottom}px');
+        style.setProperty('--safe-area-inset-left', '${left}px');
+      })();
+    """.trimIndent()
+    webView.evaluateJavascript(script, null)
   }
 
   private fun requiredBlePermissions(): List<String> {
