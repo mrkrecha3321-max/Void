@@ -13,6 +13,7 @@ import android.os.Build
 
 object NfcManager {
     private var nfcAdapter: NfcAdapter? = null
+    @Volatile private var pendingWritePayload: String? = null
 
     @JvmStatic
     fun init(activity: MainActivity) {
@@ -25,6 +26,11 @@ object NfcManager {
 
     @JvmStatic
     fun isAvailable(): Boolean = nfcAdapter != null
+
+    @JvmStatic
+    fun setPendingWritePayload(payload: String?) {
+        pendingWritePayload = payload?.trim()?.takeIf { it.isNotEmpty() }
+    }
 
     @JvmStatic
     fun enableForegroundDispatch(activity: MainActivity) {
@@ -53,9 +59,39 @@ object NfcManager {
         try { nfcAdapter?.disableForegroundDispatch(activity) } catch (e: Exception) {}
     }
 
+    private fun extractTag(intent: Intent): Tag? =
+        if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+        }
+
     @JvmStatic
     fun handleIntent(intent: Intent) {
         val action = intent.action ?: return
+        if (action != NfcAdapter.ACTION_NDEF_DISCOVERED &&
+            action != NfcAdapter.ACTION_TAG_DISCOVERED &&
+            action != NfcAdapter.ACTION_TECH_DISCOVERED
+        ) {
+            return
+        }
+
+        val toWrite = pendingWritePayload
+        if (toWrite != null) {
+            val tag = extractTag(intent)
+            if (tag == null) {
+                try { NativeBridge.onNfcError("Nie wykryto tagu NFC do zapisu") } catch (_: Throwable) {}
+                return
+            }
+            if (writeProfileTag(tag, toWrite)) {
+                pendingWritePayload = null
+                try { NativeBridge.onNfcTagRead("WRITTEN:$toWrite") } catch (_: Throwable) {}
+            } else {
+                try { NativeBridge.onNfcError("Nie udało się zapisać wizytówki VOID2 na tagu NFC") } catch (_: Throwable) {}
+            }
+            return
+        }
 
         when (action) {
             NfcAdapter.ACTION_NDEF_DISCOVERED -> {
@@ -83,13 +119,19 @@ object NfcManager {
 
     private fun readTagFromIntent(intent: Intent) {
         try {
-            @Suppress("DEPRECATION")
-            val tag = intent.getParcelableExtra<Tag>(NfcAdapter.EXTRA_TAG) ?: return
-            val ndef = Ndef.get(tag) ?: return
+            val tag = extractTag(intent) ?: return
+            val ndef = Ndef.get(tag)
+            if (ndef == null) {
+                try { NativeBridge.onNfcError("Tag NFC nie zawiera wiadomości NDEF (VOID2)") } catch (_: Throwable) {}
+                return
+            }
             ndef.connect()
             val message = ndef.ndefMessage
             ndef.close()
-            message ?: return
+            if (message == null) {
+                try { NativeBridge.onNfcError("Pusty tag NFC — brak wizytówki VOID2") } catch (_: Throwable) {}
+                return
+            }
             for (record in message.records) {
                 val text = parseNdefRecord(record) ?: continue
                 if (text.startsWith("VOID2:")) {
@@ -97,6 +139,7 @@ object NfcManager {
                     return
                 }
             }
+            try { NativeBridge.onNfcError("Tag nie zawiera podpisanej wizytówki VOID2") } catch (_: Throwable) {}
         } catch (error: Throwable) {
             try { NativeBridge.onNfcError("NFC read failed: ${error.message}") } catch (_: Throwable) {}
         }

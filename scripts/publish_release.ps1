@@ -110,7 +110,7 @@ try {
     Run npm @('run', 'test:contract-model')
 
     Write-Host "`nTworze commit i tag $Tag..."
-    Run git @('add', '--', 'package.json', 'package-lock.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json')
+    Run git @('add', '--', 'package.json', 'package-lock.json', 'src-tauri/Cargo.toml', 'src-tauri/Cargo.lock', 'src-tauri/tauri.conf.json', 'docs/index.html')
     Run git @('commit', '-m', "Release $Tag")
     Run git @('push', 'origin', 'HEAD:main')
     Run git @('tag', $Tag)

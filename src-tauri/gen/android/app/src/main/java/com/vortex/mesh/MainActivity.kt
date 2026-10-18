@@ -176,5 +176,6 @@ class MainActivity : TauriActivity() {
   companion object {
     private const val BLE_PERMISSION_REQUEST = 4201
     @Volatile private var instance: MainActivity? = null
+    @JvmStatic fun currentActivity(): MainActivity? = instance
   }
 }

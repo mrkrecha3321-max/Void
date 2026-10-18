@@ -2,15 +2,18 @@ import React, { useState } from 'react';
 import { Edit, Shield } from 'lucide-react';
 import SearchBar from '../components/SearchBar';
 import ChatListItem from '../components/ChatListItem';
-import type { Chat } from '../types';
+import type { Chat, Peer } from '../types';
+import { isPeerOnline, peerIdsMatch } from '../peerLink';
 import { motion } from 'motion/react';
 
 interface Props {
   chats: Chat[];
+  peers?: Peer[];
   onOpenChat: (chatId: string, peerName: string) => void;
+  onNewChat?: () => void;
 }
 
-const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
+const ChatList: React.FC<Props> = ({ chats, peers = [], onOpenChat, onNewChat }) => {
   const [search, setSearch] = useState('');
 
   const filtered = chats.filter(c =>
@@ -21,7 +24,12 @@ const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
     <div className="flex-1 flex flex-col h-full bg-background">
       <div className="flex items-center justify-between px-6 py-4 pt-6">
         <h1 className="text-3xl font-bold tracking-tight text-foreground">Void</h1>
-        <button className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors">
+        <button
+          onClick={onNewChat}
+          aria-label="Nowa rozmowa"
+          title="Nowa rozmowa"
+          className="w-10 h-10 rounded-full bg-secondary flex items-center justify-center text-accent hover:bg-secondary/80 transition-colors"
+        >
           <Edit size={20} />
         </button>
       </div>
@@ -55,19 +63,26 @@ const ChatList: React.FC<Props> = ({ chats, onOpenChat }) => {
         </motion.div>
       ) : (
         <div className="flex-1 overflow-y-auto pb-24 no-scrollbar">
-          {filtered.map((chat, i) => (
-            <motion.div 
-              key={chat.id}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.05 }}
-            >
-              <ChatListItem
-                chat={chat}
-                onClick={() => onOpenChat(chat.id, chat.peerName)}
-              />
-            </motion.div>
-          ))}
+          {filtered.map((chat, i) => {
+            const matchingPeer = peers.find(
+              peer => peerIdsMatch(peer.id, chat.peerId) || peerIdsMatch(peer.id, chat.id)
+            );
+            const online = matchingPeer ? isPeerOnline(matchingPeer.linkStatus, matchingPeer.online) : false;
+            return (
+              <motion.div 
+                key={chat.id}
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.05 }}
+              >
+                <ChatListItem
+                  chat={chat}
+                  online={online}
+                  onClick={() => onOpenChat(chat.id, chat.peerName)}
+                />
+              </motion.div>
+            );
+          })}
         </div>
       )}
     </div>

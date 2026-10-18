@@ -47,6 +47,22 @@ export const calculateDistanceRssi = (
   return Math.max(0.1, Math.round(distance * 10) / 10);
 };
 
+const LOCATION_RECIPIENTS_KEY = 'vortex-location-recipients';
+
+const loadLocationRecipients = (): Set<string> => {
+  try {
+    const raw = localStorage.getItem(LOCATION_RECIPIENTS_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter((item): item is string => typeof item === 'string' && /^VX-[0-9A-F]{32}$/i.test(item))
+    );
+  } catch {
+    return new Set();
+  }
+};
+
 const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
   const [scanning, setScanning] = useState(true);
   const [scanBusy, setScanBusy] = useState(false);
@@ -56,7 +72,14 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
   const sharingLocation = settings.locationSharing;
   const [myLat, setMyLat] = useState<number | null>(null);
   const [myLon, setMyLon] = useState<number | null>(null);
-  const [locationRecipients, setLocationRecipients] = useState<Set<string>>(() => new Set());
+  const [locationRecipients, setLocationRecipients] = useState<Set<string>>(loadLocationRecipients);
+
+  React.useEffect(() => {
+    try {
+      localStorage.setItem(LOCATION_RECIPIENTS_KEY, JSON.stringify(Array.from(locationRecipients)));
+    } catch {
+    }
+  }, [locationRecipients]);
 
   React.useEffect(() => {
     if (!(window as any)['__TAURI_INTERNALS__']) return;
@@ -122,7 +145,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
         let perms = await checkPermissions();
         if (perms.location !== 'granted') {
           perms = await requestPermissions(['location', 'coarseLocation']);
-          if (perms.location !== 'granted') return;
+          if (perms.location !== 'granted' && perms.coarseLocation !== 'granted') return;
         }
 
         const fetchLoc = async () => {
@@ -156,7 +179,7 @@ const RadarScreen: React.FC<Props> = ({ peers, onStartChat }) => {
       }
     };
 
-    if (scanning) {
+    if (scanning && sharingLocation) {
       setupLocation();
     }
 

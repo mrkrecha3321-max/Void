@@ -225,6 +225,55 @@ object BleManager {
         }
     }
 
+    @JvmStatic
+    @Synchronized
+    fun wipeState(ctx: Context) {
+        val app = ctx.applicationContext
+        appContext = app
+        rustReady.set(false)
+        advertisingRequested = false
+        scanningRequested = false
+        hiddenMode = false
+        batterySaveMode = false
+        localNodeId = ""
+        localName = "Void User"
+        try {
+            app.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().commit()
+        } catch (_: Throwable) {}
+        mainHandler.removeCallbacks(cleanupRunnable)
+        reconnectRunnables.values.forEach { mainHandler.removeCallbacks(it) }
+        reconnectRunnables.clear()
+        reconnectAttempts.clear()
+        writeTimeouts.values.forEach { mainHandler.removeCallbacks(it) }
+        writeTimeouts.clear()
+        writesInFlight.clear()
+        writeQueues.clear()
+        linkBusy.clear()
+        rxBuffers.clear()
+        peerShortIds.clear()
+        discoveredDevices.clear()
+        negotiatedMtu.clear()
+        stopScanningInternal()
+        stopAdvertisingInternal(closeServer = false)
+        connectedGatts.values.forEach { gatt ->
+            try { gatt.disconnect() } catch (_: Throwable) {}
+            try { gatt.close() } catch (_: Throwable) {}
+        }
+        connectedGatts.clear()
+        serverConnectedDevices.clear()
+        connectingAddresses.clear()
+        try { gattServer?.close() } catch (_: Throwable) {}
+        gattServer = null
+        gattServerReady.set(false)
+        try {
+            File(app.filesDir, PENDING_DIR).listFiles()?.forEach { it.delete() }
+        } catch (_: Throwable) {}
+        try {
+            app.stopService(Intent(app, MeshForegroundService::class.java))
+        } catch (_: Throwable) {}
+        Log.i(TAG, "BLE state wiped")
+    }
+
     private fun persistPrefs() {
         val ctx = appContext ?: return
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
@@ -413,9 +462,13 @@ object BleManager {
                     reconnectAttempts.remove(device.address)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     serverConnectedDevices.remove(device.address)
-                    failLink(device.address, "GATT server disconnect status=$status")
-                    NativeBridgeSafe.onPeerDisconnected(device.address)
-                    scheduleReconnect(device.address)
+                    if (!connectedGatts.containsKey(device.address)) {
+                        failLink(device.address, "GATT server disconnect status=$status")
+                        NativeBridgeSafe.onPeerDisconnected(device.address)
+                        scheduleReconnect(device.address)
+                    } else {
+                        Log.i(TAG, "server role disconnected for ${device.address}, keeping active client GATT")
+                    }
                 }
             } catch (error: Throwable) {
                 reportError("GATT server state callback failed", error)
@@ -485,6 +538,7 @@ object BleManager {
                 try { NativeBridge.onPeerConnected(device.address) } catch (error: Throwable) {
                     reportError("Peer connected callback failed", error)
                 }
+                mainHandler.post { drainWriteQueue(device.address) }
             }
         }
 
@@ -662,10 +716,14 @@ object BleManager {
                     }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED || status != BluetoothGatt.GATT_SUCCESS) {
                     connectedGatts.remove(address, gatt)
-                    failLink(address, "GATT client disconnect status=$status")
-                    NativeBridgeSafe.onPeerDisconnected(address)
                     try { gatt.close() } catch (_: Throwable) {}
-                    scheduleReconnect(address)
+                    if (!serverConnectedDevices.containsKey(address) && !connectedGatts.containsKey(address)) {
+                        failLink(address, "GATT client disconnect status=$status")
+                        NativeBridgeSafe.onPeerDisconnected(address)
+                        scheduleReconnect(address)
+                    } else {
+                        Log.i(TAG, "client role disconnected for $address, keeping active server GATT")
+                    }
                 }
             } catch (error: Throwable) {
                 connectingAddresses.remove(address)

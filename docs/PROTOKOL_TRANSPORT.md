@@ -6,17 +6,17 @@ Dokument opisuje framing BLE v2 oraz cykl życia wiadomości od odbioru do ACK. 
 
 Każda koperta mesh jest zawsze ramkowana, również gdy mieści się w jednym fragmencie.
 
-### v1 (legacy, marker `0x00`)
+### v1 (domyślny bezpieczny profil ATT 20 B, marker `0x00`)
 
 ```text
 +--------+------------+------------+------------+------------------+
-| 1B 0x00| 2B msg id  | 1B total   | 1B index   | payload <= 16 B  |
+| 1B 0x00| 2B msg id  | 1B total   | 1B index   | payload <= 15 B  |
 +--------+------------+------------+------------+------------------+
 ```
 
-Odbiorca nadal akceptuje poprawne ramki v1.
+`BleManager.sendMessage` domyślnie używa profilu v1 (5 B nagłówka + 15 B payloadu = 20 B zapisu ATT), dzięki czemu ramka mieści się w minimalnym ATT MTU 23 na każdym stosie BLE Androida (niezależnie od tego, która strona pełni rolę serwera/klienta GATT).
 
-### v2 (marker `0x01`)
+### v2 (rozszerzony profil MTU, marker `0x01`)
 
 ```text
 +--------+------------+------------+------------+---------------------------+

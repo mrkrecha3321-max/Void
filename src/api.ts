@@ -137,6 +137,10 @@ export const onBlePeerDiscovered = (callback: (payload: BlePeerDiscovered) => vo
   subscribe('ble_peer_discovered', callback);
 export const onNfcTagRead = (callback: (payload: { payload: string }) => void) =>
   subscribe('nfc_tag_read', callback);
+export const onNfcError = (callback: (payload: { message: string }) => void) =>
+  subscribe('nfc_error', callback);
+export const setNfcWritePayload = (payload: string | null): Promise<void> =>
+  invoke('set_nfc_write_payload', { payload });
 export const getConnectedAddresses = async (): Promise<string[]> => {
   try {
     return await invoke<string[]>('get_connected_addresses');

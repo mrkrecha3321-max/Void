@@ -23,12 +23,21 @@ object ApkInstaller {
         return try {
             val app = context.applicationContext
             val staged = stageApk(app, File(apkPath))
-            persistPending(app, staged.absolutePath)
             if (Build.VERSION.SDK_INT >= 26 && !app.packageManager.canRequestPackageInstalls()) {
+                persistPending(app, staged.absolutePath)
                 requestUnknownSources(app)
                 Log.i(TAG, "install permission missing; opened settings")
+                try {
+                    NativeBridge.onUpdateStatus(
+                        "permission_required",
+                        "Włącz zgodę na instalację z tego źródła w ustawieniach Androida i wróć do VOID."
+                    )
+                } catch (_: Throwable) {}
                 return NEED_PERMISSION
             }
+            // Clear pending path before starting PackageInstaller so MainActivity.onResume()
+            // does not re-trigger install in a loop when the system dialog closes.
+            clearPending(app)
             try {
                 commitSession(app, staged)
                 Log.i(TAG, "package installer session committed")
@@ -56,6 +65,20 @@ object ApkInstaller {
         }
         val result = install(context, pending)
         return result.ifEmpty { null }
+    }
+
+    @JvmStatic
+    fun launchLegacyViewerForStaged(context: Context): Boolean {
+        return try {
+            val app = context.applicationContext
+            val staged = File(File(app.cacheDir, "updates"), "update.apk").canonicalFile
+            if (!staged.isFile || staged.length() == 0L) return false
+            launchLegacyViewer(app, staged)
+            true
+        } catch (error: Throwable) {
+            Log.e(TAG, "legacy viewer fallback failed", error)
+            false
+        }
     }
 
     private fun stageApk(app: Context, source: File): File {
@@ -92,6 +115,7 @@ object ApkInstaller {
             }
             val callback = Intent(app, InstallResultReceiver::class.java).apply {
                 action = InstallResultReceiver.ACTION
+                setPackage(app.packageName)
             }
             var flags = PendingIntent.FLAG_UPDATE_CURRENT
             flags = if (Build.VERSION.SDK_INT >= 31) {
@@ -109,7 +133,6 @@ object ApkInstaller {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
         val resolvers = app.packageManager.queryIntentActivities(intent, 0)
         for (resolve in resolvers) {
@@ -119,15 +142,27 @@ object ApkInstaller {
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         }
-        app.startActivity(intent)
+        val activity = MainActivity.currentActivity()
+        if (activity != null) {
+            activity.startActivity(intent)
+        } else {
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            app.startActivity(intent)
+        }
     }
 
     private fun requestUnknownSources(app: Context) {
         val settings = Intent(
             Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
             Uri.parse("package:${app.packageName}")
-        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        app.startActivity(settings)
+        )
+        val activity = MainActivity.currentActivity()
+        if (activity != null) {
+            activity.startActivity(settings)
+        } else {
+            settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            app.startActivity(settings)
+        }
     }
 
     private fun persistPending(app: Context, path: String?) {

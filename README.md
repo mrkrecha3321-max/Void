@@ -27,7 +27,7 @@ Protokół v2 celowo nie przyjmuje kopert ze starego, niepodpisanego formatu.
 
 ## Transport BLE
 
-Każda wiadomość jest ramkowana, również gdy mieści się w jednym fragmencie. Aktualny nadawca używa framingu v2, którego payload wynika z wynegocjowanego MTU (`MTU - 3 - 7`). Odbiorca nadal akceptuje legacy v1.
+Każda wiadomość jest ramkowana, również gdy mieści się w jednym fragmencie. Kodek (`BleFrameCodec`) obsługuje konserwatywny framing v1 (5 B nagłówka + do 15 B ładunku = 20 B ramki ATT, używany domyślnie w `BleManager` dla pełnej kompatybilności z domyślnym MTU 23 bez zależności od asymetrii negocjacji MTU) oraz rozszerzony framing v2 (`MTU - 3 - 7`). Odbiorca dekoduje oba formaty automatycznie.
 
 Szczegóły ramek, stanów `queued/transmitting/transport_sent/delivered` oraz cyklu inbox→ACK są w [`docs/PROTOKOL_TRANSPORT.md`](docs/PROTOKOL_TRANSPORT.md).
 

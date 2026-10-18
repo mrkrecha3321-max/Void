@@ -52,6 +52,7 @@ function App() {
   const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
   const [updateVersion, setUpdateVersion] = useState<string | null>(null);
   const [isUpdating, setIsUpdating] = useState(false);
+  const [updateStatusText, setUpdateStatusText] = useState<string | null>(null);
   const [incomingSos, setIncomingSos] = useState<IncomingSos | null>(null);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -112,61 +113,74 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    const checkVer = async () => {
-      try {
-        const ver = await checkForUpdates();
-        if (!ver) return;
-        
-        const currentVer = await getVersion();
-        
-        const serverParts = parseVersion(ver);
-        const currentParts = parseVersion(currentVer);
-        if (!serverParts || !currentParts) {
-          console.warn('Odrzucono nieprawidłową wersję release:', ver);
-          return;
-        }
+  const checkAndNotifyUpdate = async (notify = false): Promise<string | null> => {
+    try {
+      const ver = await checkForUpdates();
+      if (!ver) return null;
 
-        let isNewer = false;
-        for (let index = 0; index < 3; index++) {
-          if (serverParts[index] > currentParts[index]) {
-            isNewer = true;
-            break;
-          }
-          if (serverParts[index] < currentParts[index]) break;
+      const currentVer = await getVersion();
+
+      const serverParts = parseVersion(ver);
+      const currentParts = parseVersion(currentVer);
+      if (!serverParts || !currentParts) {
+        console.warn('Odrzucono nieprawidłową wersję release:', ver);
+        return null;
+      }
+
+      let isNewer = false;
+      for (let index = 0; index < 3; index++) {
+        if (serverParts[index] > currentParts[index]) {
+          isNewer = true;
+          break;
         }
-        
-        if (isNewer) {
-          setUpdateVersion(ver);
-          
+        if (serverParts[index] < currentParts[index]) break;
+      }
+
+      if (isNewer) {
+        setUpdateVersion(ver);
+        if (notify) {
           let permissionGranted = await isPermissionGranted();
           if (!permissionGranted) {
             const permission = await requestPermission();
             permissionGranted = permission === 'granted';
           }
           if (permissionGranted) {
-            sendNotification({ 
-              title: 'Void - Nowa Wersja', 
-              body: `Wersja ${ver} jest gotowa do pobrania! Otwórz aplikację by zainstalować.` 
+            sendNotification({
+              title: 'Void - Nowa Wersja',
+              body: `Wersja ${ver} jest gotowa do pobrania! Otwórz aplikację by zainstalować.`
             });
           }
         }
-      } catch (err) {
-        console.error(err);
+        return ver;
       }
-    };
-    checkVer();
+      setUpdateVersion(null);
+      return null;
+    } catch (err) {
+      console.error(err);
+      return null;
+    }
+  };
+
+  useEffect(() => {
+    void checkAndNotifyUpdate(true);
   }, []);
 
   useEffect(() => {
     const subscription = onUpdateStatus((payload) => {
       if (payload.status === 'installed') {
         setIsUpdating(false);
+        setUpdateStatusText(null);
         setUpdateVersion(null);
+        return;
+      }
+      if (payload.status === 'permission_required' || payload.status === 'confirm_required') {
+        setIsUpdating(false);
+        setUpdateStatusText(payload.message || null);
         return;
       }
       if (payload.status === 'failed' && payload.message) {
         setIsUpdating(false);
+        setUpdateStatusText(null);
         window.alert(`Instalacja aktualizacji nie powiodła się: ${payload.message}`);
       }
     });
@@ -178,12 +192,12 @@ function App() {
   const handleUpdate = async () => {
     if (!updateVersion) return;
     setIsUpdating(true);
+    setUpdateStatusText('Pobieranie i weryfikacja pakietu APK...');
     try {
       await installUpdate(updateVersion);
-      window.alert(
-        'Aktualizacja została pobrana. Potwierdź instalację w oknie Androida. Jeśli system poprosi o zgodę na instalację z tej aplikacji, włącz ją i wróć do VOID — instalacja wznowi się sama.',
-      );
+      setUpdateStatusText('Potwierdź instalację w oknie systemu Android (lub włącz zgodę w ustawieniach i wróć do VOID).');
     } catch (err) {
+      setUpdateStatusText(null);
       window.alert(`Nie udało się zainstalować aktualizacji: ${String(err)}`);
     } finally {
       setIsUpdating(false);
@@ -212,7 +226,14 @@ function App() {
   const renderLeftPanelContent = () => {
     switch (activeTab) {
       case "chats":
-        return <ChatList chats={chats} onOpenChat={handleOpenChat} />;
+        return (
+          <ChatList
+            chats={chats}
+            peers={peers}
+            onOpenChat={handleOpenChat}
+            onNewChat={() => setActiveTab("contacts")}
+          />
+        );
       case "radar":
         return <RadarScreen peers={peers} onStartChat={handleStartChat} />;
       case "contacts":
@@ -233,6 +254,11 @@ function App() {
             connectedAddresses={connectedAddresses}
             nodeId={nodeId}
             meshError={meshError}
+            updateVersion={updateVersion}
+            isUpdating={isUpdating}
+            updateStatusText={updateStatusText}
+            onCheckUpdates={() => checkAndNotifyUpdate(false)}
+            onInstallUpdate={handleUpdate}
             onPanic={() => {
               clearAllData();
               setActiveChat(null);
@@ -240,7 +266,14 @@ function App() {
           />
         );
       default:
-        return <ChatList chats={chats} onOpenChat={handleOpenChat} />;
+        return (
+          <ChatList
+            chats={chats}
+            peers={peers}
+            onOpenChat={handleOpenChat}
+            onNewChat={() => setActiveTab("contacts")}
+          />
+        );
     }
   };
 
@@ -249,12 +282,19 @@ function App() {
       className={`flex flex-col h-screen w-full relative overflow-hidden bg-background text-foreground ${theme === "dark" ? "dark" : ""}`}
     >
       {updateVersion && (
-        <div className="bg-blue-600 text-white px-4 py-3 flex justify-between items-center z-[110] text-sm font-medium border-b border-black/10">
-          <span>
-            Nowa wersja <strong>{updateVersion}</strong> jest dostępna!
-          </span>
+        <div className="bg-blue-600 text-white px-4 py-3 flex justify-between items-center gap-3 z-[110] text-sm font-medium border-b border-black/10">
+          <div className="flex flex-col min-w-0">
+            <span>
+              Nowa wersja <strong>{updateVersion}</strong> jest dostępna!
+            </span>
+            {updateStatusText && (
+              <span className="text-xs text-white/90 mt-0.5 leading-snug">
+                {updateStatusText}
+              </span>
+            )}
+          </div>
           <button
-            className="bg-white text-blue-600 border-none px-3 py-1.5 rounded-md font-bold cursor-pointer hover:bg-gray-100 transition-colors"
+            className="bg-white text-blue-600 border-none px-3 py-1.5 rounded-md font-bold cursor-pointer hover:bg-gray-100 transition-colors shrink-0"
             onClick={handleUpdate}
             disabled={isUpdating}
           >
@@ -413,6 +453,11 @@ function App() {
                   connectedAddresses={connectedAddresses}
                   nodeId={nodeId}
                   meshError={meshError}
+                  updateVersion={updateVersion}
+                  isUpdating={isUpdating}
+                  updateStatusText={updateStatusText}
+                  onCheckUpdates={() => checkAndNotifyUpdate(false)}
+                  onInstallUpdate={handleUpdate}
                   onPanic={() => {
                     clearAllData();
                     setActiveChat(null);

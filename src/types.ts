@@ -117,36 +117,8 @@ export interface SosReceivedPayload {
   timestamp: number;
 }
 
-export type TabType = 'chats' | 'contacts' | 'menu';
+export type TabType = 'chats' | 'radar' | 'contacts' | 'menu';
 export type Tab = TabType;
-
-export interface ProfileSettings {
-  nickname: string;
-  avatar: string;
-  bio: string;
-  nodeId: string;
-}
-
-export interface TransportSettings {
-  udp: boolean;
-  ble: boolean;
-  internet: boolean;
-}
-
-export interface NotificationSettings {
-  enabled: boolean;
-  volume: number;
-}
-
-export interface Contact {
-  nodeId: string;
-  nickname: string;
-  avatar: string;
-  avatarColor: string;
-  bio: string;
-  isOnline: boolean;
-  lastSeen?: string;
-}
 
 export interface ChatNode {
   id: string;
@@ -157,15 +129,4 @@ export interface ChatNode {
   time: string;
   unread: number;
   bio?: string;
-}
-
-export type ThemePreference = 'system' | 'light' | 'dark';
-
-export type PowerMode = 'FullMesh' | 'LowPowerRelay' | 'ReceiverOnly' | 'Stealth';
-
-export interface MeshSettings {
-  visibility: 'Public' | 'Stealth';
-  powerMode: PowerMode;
-  ephemeralId?: string;
-  keysGeneratedAt?: string;
 }

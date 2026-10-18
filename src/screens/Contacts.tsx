@@ -5,7 +5,7 @@ import { isPeerOnline, peerLinkLabel } from '../peerLink';
 import { Users, UserPlus, RadioReceiver, Hash, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { listen } from '@tauri-apps/api/event';
-import { importContactCard } from '../api';
+import { getContactCard, importContactCard, onNfcError, setNfcWritePayload } from '../api';
 
 interface Props {
   peers: Peer[];
@@ -17,11 +17,13 @@ interface Props {
 const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) => {
   const [copied, setCopied] = useState(false);
   const [showNfcModal, setShowNfcModal] = useState(false);
+  const [nfcMode, setNfcMode] = useState<'read' | 'write'>('read');
   const [showIdModal, setShowIdModal] = useState(false);
   const [nfcStatus, setNfcStatus] = useState<string>('');
   const [peerIdInput, setPeerIdInput] = useState('');
   const [peerNameInput, setPeerNameInput] = useState('');
   const nfcUnlistenRef = useRef<(() => void) | null>(null);
+  const nfcErrorUnlistenRef = useRef<(() => void) | null>(null);
   const nfcTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Tauri WebView does not support Web NFC; keep this native event bridge.
@@ -35,15 +37,38 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         nfcUnlistenRef.current();
         nfcUnlistenRef.current = null;
       }
+      if (nfcErrorUnlistenRef.current) {
+        nfcErrorUnlistenRef.current();
+        nfcErrorUnlistenRef.current = null;
+      }
+      void setNfcWritePayload(null).catch(() => {});
       return;
     }
 
-    setNfcStatus('Zbliż telefon do podpisanego tagu VOID2...');
+    if (nfcMode === 'write') {
+      setNfcStatus('Przygotowywanie podpisanej wizytówki VOID2...');
+      getContactCard()
+        .then(card => setNfcWritePayload(card))
+        .then(() => {
+          setNfcStatus('Zbliż czysty lub zapisywalny tag NFC, aby zapisać wizytówkę VOID2...');
+        })
+        .catch(error => {
+          setNfcStatus(`Nie udało się przygotować zapisu NFC: ${String(error)}`);
+        });
+    } else {
+      void setNfcWritePayload(null).catch(() => {});
+      setNfcStatus('Zbliż telefon do podpisanego tagu VOID2...');
+    }
 
     listen<{ payload: string }>('nfc_tag_read', async (event) => {
       try {
         const raw: string =
           (event.payload as any)?.payload ?? (event.payload as unknown as string);
+        if (typeof raw === 'string' && raw.startsWith('WRITTEN:')) {
+          setNfcStatus('✅ Zapisano podpisaną wizytówkę VOID2 na tagu NFC!');
+          setNfcMode('read');
+          return;
+        }
         if (typeof raw !== 'string' || !raw.startsWith('VOID2:')) {
           setNfcStatus('Tag nie zawiera podpisanej wizytówki VOID2');
           return;
@@ -65,6 +90,12 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
       setNfcStatus('NFC niedostępne (tryb deweloperski)');
     });
 
+    onNfcError(({ message }) => {
+      setNfcStatus(`⚠️ ${message}`);
+    }).then(unlisten => {
+      if (unlisten) nfcErrorUnlistenRef.current = unlisten;
+    }).catch(() => {});
+
     return () => {
       if (nfcTimerRef.current) {
         clearTimeout(nfcTimerRef.current);
@@ -74,18 +105,36 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
         nfcUnlistenRef.current();
         nfcUnlistenRef.current = null;
       }
+      if (nfcErrorUnlistenRef.current) {
+        nfcErrorUnlistenRef.current();
+        nfcErrorUnlistenRef.current = null;
+      }
     };
-  }, [showNfcModal, onAddPeer, onStartChat]);
+  }, [showNfcModal, nfcMode, onAddPeer, onStartChat]);
 
   const handleNfcScan = () => {
+    setNfcMode('read');
     setShowNfcModal(true);
   };
 
   const handleAddById = async (e: React.FormEvent) => {
     e.preventDefault();
-    const peerId = peerIdInput.trim().toUpperCase();
+    const rawInput = peerIdInput.trim();
+    if (rawInput.startsWith('VOID2:')) {
+      try {
+        const contact = await importContactCard(rawInput);
+        onStartChat(contact.nodeId, contact.name);
+        setShowIdModal(false);
+        setPeerIdInput('');
+        setPeerNameInput('');
+      } catch (error) {
+        window.alert(`Nie udało się zaimportować wizytówki VOID2: ${String(error)}`);
+      }
+      return;
+    }
+    const peerId = rawInput.toUpperCase();
     if (!/^VX-[0-9A-F]{32}$/.test(peerId)) {
-      window.alert('Node ID musi mieć format VX- i 32 znaki szesnastkowe.');
+      window.alert('Wpisz pełny Node ID (format VX- i 32 znaki HEX) lub wklej podpisaną wizytówkę VOID2:...');
       return;
     }
     const name = (peerNameInput.trim() || peerId.slice(0, 11)).slice(0, 80);
@@ -208,15 +257,15 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               >
                 <X size={24} />
               </button>
-              <h2 className="text-xl font-bold mb-6 text-center">Dodaj Kontakt (ID)</h2>
+              <h2 className="text-xl font-bold mb-6 text-center">Dodaj Kontakt</h2>
               <form onSubmit={handleAddById} className="flex flex-col gap-4">
                 <div>
-                  <label className="text-xs font-semibold text-muted-foreground ml-2 mb-1 block uppercase tracking-wider">Node ID</label>
+                  <label className="text-xs font-semibold text-muted-foreground ml-2 mb-1 block uppercase tracking-wider">Node ID lub wizytówka VOID2</label>
                   <input
                     type="text"
                     value={peerIdInput}
                     onChange={(e) => setPeerIdInput(e.target.value)}
-                    placeholder="np. VX-A1B2C3D4"
+                    placeholder="VX-... lub VOID2:..."
                     className="w-full bg-secondary text-foreground rounded-2xl px-4 py-3 outline-none focus:ring-2 focus:ring-accent"
                     required
                   />
@@ -263,12 +312,30 @@ const Contacts: React.FC<Props> = ({ peers, onStartChat, onAddPeer, myNodeId }) 
               >
                 <X size={24} />
               </button>
-              <div className="w-20 h-20 rounded-full bg-accent/20 flex items-center justify-center mb-6 mt-4">
+              <div className="w-20 h-20 rounded-full bg-accent/20 flex items-center justify-center mb-4 mt-4">
                 <RadioReceiver size={40} className="text-accent animate-pulse" />
               </div>
-              <h2 className="text-xl font-bold mb-2">Dodawanie przez NFC</h2>
-              <p className="text-muted-foreground mb-6 text-sm leading-relaxed">
-                Zbliż telefon do przygotowanego tagu NFC z profilem VOID. Połączenie i klucz zostaną uwierzytelnione dopiero przez podpisany protokół BLE.
+              <h2 className="text-xl font-bold mb-2">Wizytówka NFC</h2>
+              <div className="grid grid-cols-2 gap-2 w-full bg-secondary/60 p-1 rounded-2xl mb-4">
+                <button
+                  type="button"
+                  onClick={() => setNfcMode('read')}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-colors ${nfcMode === 'read' ? 'bg-accent text-white shadow' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  Odczytaj tag
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNfcMode('write')}
+                  className={`py-2 px-3 rounded-xl text-xs font-bold transition-colors ${nfcMode === 'write' ? 'bg-accent text-white shadow' : 'text-muted-foreground hover:text-foreground'}`}
+                >
+                  Zapisz mój profil
+                </button>
+              </div>
+              <p className="text-muted-foreground mb-5 text-sm leading-relaxed">
+                {nfcMode === 'read'
+                  ? 'Zbliż telefon do tagu NFC z podpisaną wizytówką VOID2, aby zweryfikować klucze Ed25519/X25519 i dodać kontakt.'
+                  : 'Zbliż zapisywalny tag NFC (NDEF), aby zapisać na nim swoją podpisaną wizytówkę VOID2.'}
               </p>
               <div className="w-full bg-secondary/50 rounded-xl py-3 px-4 text-sm font-semibold text-accent min-h-[44px] flex items-center justify-center">
                 {nfcStatus || 'Czekam...'}

@@ -236,6 +236,7 @@ async fn import_identity_backup(
     .map_err(|e| format!("Watek importu kopii zakonczyl sie bledem: {e}"))??;
     // Vault encryption is identity-bound. Import intentionally clears local
     // peer pins/history; they can be rebuilt after the restored identity starts.
+    let _ = native_bridge::calls::wipe_ble_state();
     state.secure_store.destroy()?;
     crypto::write_identity(&state.identity_path, &identity)?;
     let app_to_exit = app.clone();
@@ -252,6 +253,7 @@ async fn trigger_panic_button(
     state: State<'_, AppState>,
     mesh: State<'_, mesh::MeshState>,
 ) -> Result<(), String> {
+    let _ = native_bridge::calls::wipe_ble_state();
     crypto::destroy_identity(&state.identity_path)?;
     state.secure_store.destroy()?;
     mesh.clear_sensitive_state();
@@ -313,6 +315,16 @@ fn get_node_id(state: State<'_, AppState>) -> String {
 #[tauri::command]
 fn get_connected_addresses(mesh: State<'_, mesh::MeshState>) -> Vec<String> {
     mesh.get_connected_addresses()
+}
+
+#[tauri::command]
+fn set_nfc_write_payload(payload: Option<String>) -> Result<(), String> {
+    if let Some(ref value) = payload {
+        if !value.is_empty() && (!value.starts_with("VOID2:") || value.len() > 2048) {
+            return Err("Nieprawidlowy format wizytowki VOID2 do zapisu NFC".to_string());
+        }
+    }
+    native_bridge::calls::set_nfc_write_payload(payload.as_deref())
 }
 
 #[tauri::command]
@@ -529,7 +541,8 @@ pub fn run() {
             list_pending_inbox,
             confirm_inbox,
             mesh_send_sos,
-            get_connected_addresses
+            get_connected_addresses,
+            set_nfc_write_payload
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

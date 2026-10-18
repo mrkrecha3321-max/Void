@@ -16,14 +16,32 @@ class InstallResultReceiver : BroadcastReceiver() {
         Log.i(TAG, "package installer status=$status")
         when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> {
-                val confirm = extraIntent(intent) ?: return
-                confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val confirm = extraIntent(intent)
+                if (confirm == null) {
+                    if (!ApkInstaller.launchLegacyViewerForStaged(context)) {
+                        ApkInstaller.clearPending(context)
+                        NativeBridgeSafeUpdate.onError("Brak intencji potwierdzenia instalatora Androida")
+                    }
+                    return
+                }
                 try {
-                    context.startActivity(confirm)
+                    NativeBridgeSafeUpdate.onStatus(
+                        "confirm_required",
+                        "Potwierdź instalację aktualizacji w oknie systemu Android."
+                    )
+                    val activity = MainActivity.currentActivity()
+                    if (activity != null) {
+                        activity.startActivity(confirm)
+                    } else {
+                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(confirm)
+                    }
                 } catch (error: Throwable) {
-                    Log.e(TAG, "could not show installer confirmation", error)
-                    ApkInstaller.clearPending(context)
-                    NativeBridgeSafeUpdate.onError("Nie mozna otworzyc instalatora Androida")
+                    Log.e(TAG, "could not show installer confirmation, trying legacy viewer", error)
+                    if (!ApkInstaller.launchLegacyViewerForStaged(context)) {
+                        ApkInstaller.clearPending(context)
+                        NativeBridgeSafeUpdate.onError("Nie mozna otworzyc instalatora Androida")
+                    }
                 }
             }
             PackageInstaller.STATUS_SUCCESS -> {
@@ -54,11 +72,15 @@ class InstallResultReceiver : BroadcastReceiver() {
 }
 
 private object NativeBridgeSafeUpdate {
+    fun onStatus(status: String, message: String) {
+        try { NativeBridge.onUpdateStatus(status, message) } catch (_: Throwable) {}
+    }
+
     fun onInstalled() {
-        try { NativeBridge.onUpdateStatus("installed", "") } catch (_: Throwable) {}
+        onStatus("installed", "")
     }
 
     fun onError(message: String) {
-        try { NativeBridge.onUpdateStatus("failed", message) } catch (_: Throwable) {}
+        onStatus("failed", message)
     }
 }

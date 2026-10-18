@@ -340,8 +340,8 @@ export function useChats() {
       setMessages(prev => ({
         ...prev,
         [chatId]: (prev[chatId] || []).map(message =>
-          message.id === msgId && !message.delivered
-            ? { ...message, failed: true, queued: false, transmitting: false, status: 'failed', error: 'Brak potwierdzenia dostarczenia w ciągu 60 sekund' }
+          message.id === msgId && !message.delivered && (message.transmitting || message.status === 'transmitting')
+            ? { ...message, failed: true, queued: false, transmitting: false, status: 'failed', error: 'Przekroczono czas transmisji BLE (60 sekund)' }
             : message
         ),
       }));
@@ -500,16 +500,20 @@ export function useChats() {
     });
 
     const transportSentPromise = onMessageTransportSent(({ msgId }) => {
+      const timer = deliveryTimersRef.current.get(msgId);
+      if (timer) {
+        clearTimeout(timer);
+        deliveryTimersRef.current.delete(msgId);
+      }
       setMessages(prev => {
         const next = { ...prev };
         for (const [chatId, chatMessages] of Object.entries(next)) {
           if (!chatMessages.some(message => message.id === msgId)) continue;
           next[chatId] = chatMessages.map(message =>
             message.id === msgId
-              ? { ...message, queued: false, transmitting: false, failed: false, status: 'transport_sent', error: undefined }
+              ? { ...message, queued: false, transmitting: false, failed: false, status: message.delivered ? 'delivered' : 'transport_sent', error: undefined }
               : message
           );
-          armDeliveryTimer(msgId, chatId);
           return next;
         }
         return prev;

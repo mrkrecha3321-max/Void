@@ -588,6 +588,46 @@ pub mod calls {
             Err(message)
         }
     }
+
+    pub fn wipe_ble_state() -> Result<(), String> {
+        let android_ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let ctx_cell = super::ANDROID_CONTEXT
+            .get()
+            .ok_or("ANDROID_CONTEXT not set")?;
+        let ctx_guard = ctx_cell.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx_ref = ctx_guard
+            .as_ref()
+            .ok_or("ANDROID_CONTEXT GlobalRef is None")?;
+        let class = find_app_class(&mut env, "com/vortex/mesh/BleManager")?;
+        env.call_static_method(
+            class,
+            "wipeState",
+            "(Landroid/content/Context;)V",
+            &[JValue::Object(ctx_ref.as_obj())],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_nfc_write_payload(payload: Option<&str>) -> Result<(), String> {
+        let android_ctx = ndk_context::android_context();
+        let vm = unsafe { JavaVM::from_raw(android_ctx.vm().cast()) }.map_err(|e| e.to_string())?;
+        let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+        let class = find_app_class(&mut env, "com/vortex/mesh/NfcManager")?;
+        let payload_j = env
+            .new_string(payload.unwrap_or(""))
+            .map_err(|e| e.to_string())?;
+        env.call_static_method(
+            class,
+            "setPendingWritePayload",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&payload_j.into())],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -621,5 +661,11 @@ pub mod calls {
     }
     pub fn install_apk(_path: &str) -> Result<(), String> {
         Err("Instalacja APK jest dostepna tylko na Androidzie".into())
+    }
+    pub fn wipe_ble_state() -> Result<(), String> {
+        Ok(())
+    }
+    pub fn set_nfc_write_payload(_payload: Option<&str>) -> Result<(), String> {
+        Ok(())
     }
 }

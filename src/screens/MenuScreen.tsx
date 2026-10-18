@@ -30,6 +30,11 @@ interface Props {
   nodeId: string | null;
   meshError: string | null;
   onPanic?: () => void;
+  updateVersion?: string | null;
+  isUpdating?: boolean;
+  updateStatusText?: string | null;
+  onCheckUpdates?: () => Promise<string | null>;
+  onInstallUpdate?: () => void;
 }
 
 const MenuScreen: React.FC<Props> = ({
@@ -40,6 +45,11 @@ const MenuScreen: React.FC<Props> = ({
   nodeId,
   meshError,
   onPanic,
+  updateVersion,
+  isUpdating = false,
+  updateStatusText,
+  onCheckUpdates,
+  onInstallUpdate,
 }) => {
   const [showSettings, setShowSettings] = useState(false);
   const { settings, updateSetting } = useSettings();
@@ -60,6 +70,9 @@ const MenuScreen: React.FC<Props> = ({
   const [sendingSos, setSendingSos] = useState(false);
   const [appVersion, setAppVersion] = useState('');
   const [contactCard, setContactCard] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateCheckInfo, setUpdateCheckInfo] = useState<string | null>(null);
+  const [copiedCard, setCopiedCard] = useState(false);
 
   React.useEffect(() => {
     getVersion().then(v => setAppVersion(v)).catch(console.error);
@@ -268,16 +281,53 @@ const MenuScreen: React.FC<Props> = ({
         <div className="px-6 pt-6 pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
           O aplikacji
         </div>
-        <div className="flex items-center px-6 py-4 mb-4">
-          <div className="w-10 h-10 rounded-full bg-accent/10 text-accent flex items-center justify-center flex-shrink-0">
-            <Info size={20} />
+        <div className="flex flex-col px-6 py-4 mb-4 gap-3">
+          <div className="flex items-center">
+            <div className="w-10 h-10 rounded-full bg-accent/10 text-accent flex items-center justify-center flex-shrink-0">
+              <Info size={20} />
+            </div>
+            <div className="flex-1 ml-4 flex flex-col">
+              <span className="text-base font-semibold text-foreground">O Void</span>
+              <span className="text-sm text-muted-foreground">System łączności rozproszonej</span>
+              <span className="text-xs text-emerald-500 font-medium mt-1">
+                {updateStatusText || updateCheckInfo || (updateVersion ? `Dostępna aktualizacja ${updateVersion}` : 'Auto-updater aktywny ✅')}
+              </span>
+            </div>
+            <span className="text-sm font-medium text-muted-foreground bg-secondary px-2.5 py-1 rounded-md">v{appVersion || '...'}</span>
           </div>
-          <div className="flex-1 ml-4 flex flex-col">
-            <span className="text-base font-semibold text-foreground">O Void</span>
-            <span className="text-sm text-muted-foreground">System łączności rozproszonej</span>
-            <span className="text-xs text-emerald-500 font-medium mt-1">Auto-updater aktywny ✅</span>
+          <div className="flex gap-2 pl-14">
+            {updateVersion && onInstallUpdate ? (
+              <button
+                type="button"
+                disabled={isUpdating}
+                onClick={onInstallUpdate}
+                className="px-3.5 py-2 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-500 disabled:opacity-50 transition-colors"
+              >
+                {isUpdating ? 'Pobieranie i instalacja...' : `Zainstaluj ${updateVersion}`}
+              </button>
+            ) : null}
+            {onCheckUpdates && (
+              <button
+                type="button"
+                disabled={checkingUpdate || isUpdating}
+                onClick={async () => {
+                  setCheckingUpdate(true);
+                  setUpdateCheckInfo('Sprawdzanie GitHub Releases...');
+                  try {
+                    const found = await onCheckUpdates();
+                    setUpdateCheckInfo(found ? `Znaleziono nową wersję: ${found}` : 'Masz najnowszą wersję ✅');
+                  } catch (err) {
+                    setUpdateCheckInfo(`Błąd sprawdzania: ${String(err)}`);
+                  } finally {
+                    setCheckingUpdate(false);
+                  }
+                }}
+                className="px-3.5 py-2 rounded-xl bg-secondary border border-border/60 text-foreground text-xs font-semibold hover:bg-secondary/80 disabled:opacity-50 transition-colors"
+              >
+                {checkingUpdate ? 'Sprawdzam...' : 'Sprawdź aktualizacje'}
+              </button>
+            )}
           </div>
-          <span className="text-sm font-medium text-muted-foreground bg-secondary px-2.5 py-1 rounded-md">v{appVersion || '...'}</span>
         </div>
 
         <div className="h-px bg-border/50 mx-6 my-4" />
@@ -423,14 +473,27 @@ const MenuScreen: React.FC<Props> = ({
                 
                 {!editProfile && (
                                     <>
-                  <div className="mt-4 flex flex-col items-center justify-center p-6 bg-white rounded-2xl">
-                    <div className="text-center mb-3">
-                      <span className="text-black font-bold text-sm">Zeskanuj mój profil</span>
+                  <div className="mt-4 flex flex-col items-center justify-center p-6 bg-white rounded-2xl gap-3">
+                    <div className="text-center">
+                      <span className="text-black font-bold text-sm">Zeskanuj mój profil (VOID2)</span>
                     </div>
                     {contactCard ? (
                        <QRCodeSVG value={contactCard} size={150} level="M" />
                     ) : (
                        <div className="w-[150px] h-[150px] flex items-center justify-center bg-gray-200 rounded-lg text-gray-500 text-xs text-center">Brak ID</div>
+                    )}
+                    {contactCard && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(contactCard);
+                          setCopiedCard(true);
+                          setTimeout(() => setCopiedCard(false), 2000);
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-gray-900 text-white text-xs font-semibold hover:bg-gray-800 transition-colors"
+                      >
+                        {copiedCard ? '✓ Skopiowano wizytówkę VOID2' : 'Kopiuj wizytówkę VOID2'}
+                      </button>
                     )}
                   </div>
 
