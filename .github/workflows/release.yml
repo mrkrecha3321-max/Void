@@ -51,9 +51,12 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: 'platform-tools'
 
       - name: Install Android platform, build tools and NDK
         run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
           echo "y" | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
             "platforms;android-36" "build-tools;36.0.0" "platform-tools" "ndk;27.0.12077973"
           echo "$ANDROID_HOME/build-tools/36.0.0" >> "$GITHUB_PATH"
