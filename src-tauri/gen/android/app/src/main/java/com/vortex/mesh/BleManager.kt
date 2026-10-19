@@ -70,9 +70,16 @@ object BleManager {
     private val scanningActive = AtomicBoolean(false)
     private val gattServerReady = AtomicBoolean(false)
 
+    private const val IDLE_THRESHOLD_MS = 180_000L
+    private const val DUTY_SCAN_WINDOW_MS = 10_000L
+    private const val DUTY_SLEEP_WINDOW_MS = 20_000L
+    @Volatile private var lastActivityAtMs: Long = System.currentTimeMillis()
+    @Volatile private var dutyCycleSleeping: Boolean = false
+
     private val cleanupRunnable = object : Runnable {
         override fun run() {
             cleanupStaleBuffers()
+            evaluateDutyCycle()
             mainHandler.postDelayed(this, CLEANUP_INTERVAL_MS)
         }
     }
@@ -86,6 +93,42 @@ object BleManager {
 
     @JvmStatic fun getLocalNodeId(): String = localNodeId
     @JvmStatic fun getLocalName(): String = localName
+
+    @JvmStatic
+    fun notifyUserActivity(ctx: Context) {
+        lastActivityAtMs = System.currentTimeMillis()
+        if (dutyCycleSleeping && scanningRequested) {
+            dutyCycleSleeping = false
+            Log.i(TAG, "user/peer activity detected; waking scan to LOW_LATENCY")
+            startScanning(ctx.applicationContext)
+        }
+    }
+
+    private fun evaluateDutyCycle() {
+        val ctx = appContext ?: return
+        if (!scanningRequested || !canBle(ctx)) return
+        val idleDuration = System.currentTimeMillis() - lastActivityAtMs
+        val hasActiveLinks = connectedGatts.isNotEmpty() || serverConnectedDevices.isNotEmpty()
+        if (hasActiveLinks || idleDuration < IDLE_THRESHOLD_MS) {
+            if (dutyCycleSleeping) {
+                dutyCycleSleeping = false
+                startScanning(ctx)
+            }
+            return
+        }
+        // In idle standby (>3 min without peer activity/links): alternate 10s scan / 20s sleep
+        val cyclePos = (idleDuration - IDLE_THRESHOLD_MS) % (DUTY_SCAN_WINDOW_MS + DUTY_SLEEP_WINDOW_MS)
+        val shouldSleep = cyclePos >= DUTY_SCAN_WINDOW_MS
+        if (shouldSleep && !dutyCycleSleeping) {
+            dutyCycleSleeping = true
+            Log.i(TAG, "adaptive duty-cycle: entering 20s standby sleep")
+            stopScanningInternal()
+        } else if (!shouldSleep && dutyCycleSleeping) {
+            dutyCycleSleeping = false
+            Log.i(TAG, "adaptive duty-cycle: entering 10s active scan window")
+            startScanning(ctx)
+        }
+    }
 
     private fun startCleanupLoop() {
         mainHandler.removeCallbacks(cleanupRunnable)
@@ -312,7 +355,8 @@ object BleManager {
                     }
                     rxBuffers.remove(key, buffer)
                     val message = output.toByteArray()
-                    if (message.size <= BleFrameCodec.MAX_MESSAGE_BYTES) {
+                    if (message.size <= BleFrameCodec.MAX_MEDIA_MESSAGE_BYTES) {
+                        lastActivityAtMs = System.currentTimeMillis()
                         dispatchCompleteMessage(address, String(message, Charsets.UTF_8))
                     }
                 }
@@ -333,7 +377,7 @@ object BleManager {
     }
 
     private fun persistPendingRx(ctx: Context, address: String, payload: String) {
-        if (payload.length > BleFrameCodec.MAX_MESSAGE_BYTES || address.length > 32) return
+        if (payload.length > BleFrameCodec.MAX_MEDIA_MESSAGE_BYTES || address.length > 32) return
         val dir = File(ctx.filesDir, PENDING_DIR)
         if (!dir.exists() && !dir.mkdirs()) return
         val existing = dir.listFiles()?.size ?: 0
@@ -384,7 +428,11 @@ object BleManager {
             startCleanupLoop()
             if (!canBle(ctx) || localNodeId.length != 35 || !localNodeId.startsWith("VX-")) return false
             val currentAdapter = adapter ?: bluetoothManager?.adapter ?: return false
-            if (!currentAdapter.isEnabled) return false
+            if (!currentAdapter.isEnabled) {
+                safeBleError("Bluetooth jest wyłączony — włącz Bluetooth w oknie systemowym")
+                MainActivity.requestBluetoothEnable()
+                return false
+            }
             advertiser = currentAdapter.bluetoothLeAdvertiser ?: return false
             startGattServerIfNeeded(ctx)
             if (advertisingActive.get()) {
@@ -583,12 +631,17 @@ object BleManager {
     @Synchronized
     fun startScanning(ctx: Context): Boolean {
         scanningRequested = true
+        dutyCycleSleeping = false
         persistPrefs()
         return try {
             appContext = ctx.applicationContext
             if (!canBle(ctx)) return false
             val currentAdapter = adapter ?: bluetoothManager?.adapter ?: return false
-            if (!currentAdapter.isEnabled) return false
+            if (!currentAdapter.isEnabled) {
+                safeBleError("Bluetooth jest wyłączony — włącz Bluetooth w oknie systemowym")
+                MainActivity.requestBluetoothEnable()
+                return false
+            }
             scanner = currentAdapter.bluetoothLeScanner ?: return false
             if (scanningActive.get()) {
                 Log.i(TAG, "restarting active scan")
@@ -597,9 +650,11 @@ object BleManager {
             // recovers when Android stopped a previous scan silently.
             stopScanningInternal()
             val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+            val idleStandby = (System.currentTimeMillis() - lastActivityAtMs > IDLE_THRESHOLD_MS) &&
+                connectedGatts.isEmpty() && serverConnectedDevices.isEmpty()
             val settings = ScanSettings.Builder()
                 .setScanMode(
-                    if (batterySaveMode) ScanSettings.SCAN_MODE_LOW_POWER
+                    if (batterySaveMode || idleStandby) ScanSettings.SCAN_MODE_LOW_POWER
                     else ScanSettings.SCAN_MODE_LOW_LATENCY
                 )
                 .build()
@@ -617,6 +672,7 @@ object BleManager {
     @Synchronized
     fun stopScanning(ctx: Context) {
         scanningRequested = false
+        dutyCycleSleeping = false
         persistPrefs()
         stopScanningInternal()
     }
@@ -639,6 +695,7 @@ object BleManager {
                 val shortId = String(data, Charsets.US_ASCII).uppercase()
                 if (shortId.length != 8 || !shortId.all { it in '0'..'9' || it in 'A'..'F' }) return
 
+                lastActivityAtMs = System.currentTimeMillis()
                 peerShortIds.putIfAbsent(shortId, address)
                 discoveredDevices[address] = device
                 NativeBridgeSafe.onPeerDiscovered(address, shortId, "Kontakt ($shortId)", result.rssi)
@@ -788,9 +845,10 @@ object BleManager {
     fun sendMessage(ctx: Context, deviceAddress: String, text: String, meshMsgId: String): Boolean {
         return try {
             appContext = ctx.applicationContext
+            lastActivityAtMs = System.currentTimeMillis()
             if (!canBle(ctx) || meshMsgId.isBlank()) return false
             val bytes = text.toByteArray(Charsets.UTF_8)
-            if (bytes.isEmpty() || bytes.size > BleFrameCodec.MAX_MESSAGE_BYTES) return false
+            if (bytes.isEmpty() || bytes.size > BleFrameCodec.MAX_MEDIA_MESSAGE_BYTES) return false
             val existing = writeQueues[deviceAddress]
             if (existing?.contains(meshMsgId) == true) {
                 Log.i(TAG, "skip duplicate queue msgId=$meshMsgId")
@@ -801,12 +859,13 @@ object BleManager {
                 return false
             }
 
-            val frames = BleFrameCodec.encode(bytes, allocateMessageId())
+            val frames = BleFrameCodec.encodeAdaptive(bytes, allocateMessageId(), BleLinkPolicy.DEFAULT_MTU)
             if (frames.isEmpty()) return false
             val queue = writeQueues.computeIfAbsent(deviceAddress) { BleOutboundQueue() }
             val status = queue.enqueue(meshMsgId, frames)
             if (status == EnqueueStatus.REJECTED) return false
-            Log.i(TAG, "queued meshMsgId=$meshMsgId frames=${frames.size} protocol=v1 chunkBytes=${BleFrameCodec.CHUNK_SIZE}")
+            val proto = if (bytes.size <= BleFrameCodec.MAX_MESSAGE_BYTES) "v1" else "v2"
+            Log.i(TAG, "queued meshMsgId=$meshMsgId frames=${frames.size} protocol=$proto chunkBytes=${BleFrameCodec.CHUNK_SIZE}")
             mainHandler.post { drainWriteQueue(deviceAddress) }
             true
         } catch (error: Throwable) {

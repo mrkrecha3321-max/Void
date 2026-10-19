@@ -15,6 +15,7 @@ import {
   onBlePeerConnecting,
   onPeerLink,
   onPeerLocationReceived,
+  onPeerVerified,
   onBleError,
   setNodeName,
   type BlePeerDiscovered,
@@ -192,6 +193,13 @@ export function useMesh() {
       });
     });
 
+    const verifiedPromise = onPeerVerified((payload) => {
+      if (!isMounted) return;
+      setPeers(prev =>
+        prev.map(p => (p.id === payload.peerId ? { ...p, verified: payload.verified } : p))
+      );
+    });
+
     const initNodeId = async () => {
       try {
         const id = await getNodeId();
@@ -291,6 +299,7 @@ export function useMesh() {
       bleErrorPromise.then(unlisten => unlisten && unlisten());
       permPromise.then(unlisten => unlisten && unlisten());
       locationPromise.then(unlisten => unlisten && unlisten());
+      verifiedPromise.then(unlisten => unlisten && unlisten());
     };
   }, []);
 

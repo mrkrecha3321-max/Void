@@ -21,6 +21,7 @@ import { useTheme } from "./hooks/useTheme";
 import { useMesh } from "./hooks/useMesh";
 import { useChats } from "./hooks/useChats";
 import { peerIdsMatch } from "./peerLink";
+import { playSosAlertTone } from "./utils/tacticalAudio";
 
 type Tab = "chats" | "radar" | "contacts" | "menu";
 
@@ -46,7 +47,7 @@ const parseVersion = (value: string): [number, number, number] | null => {
 function App() {
   const { theme, toggleTheme } = useTheme();
   const { peers, connected, connectedAddresses, nodeId, error: meshError, addPeer } = useMesh();
-  const { chats, messagesForChat, sendMessage, startChat, markRead, retryMessage, clearAllData } = useChats();
+  const { chats, messagesForChat, sendMessage, startChat, createGroupChat, markRead, retryMessage, clearAllData } = useChats();
 
   const [activeTab, setActiveTab] = useState<Tab>("chats");
   const [activeChat, setActiveChat] = useState<ActiveChat | null>(null);
@@ -83,6 +84,7 @@ function App() {
     let mounted = true;
     const subscription = onSosReceived((payload) => {
       if (!mounted) return;
+      playSosAlertTone();
       const coordinates = payload.lat !== undefined && payload.lon !== undefined
         ? `${payload.lat.toFixed(5)}, ${payload.lon.toFixed(5)}`
         : "Brak dołączonej lokalizacji";
@@ -232,6 +234,7 @@ function App() {
             peers={peers}
             onOpenChat={handleOpenChat}
             onNewChat={() => setActiveTab("contacts")}
+            onCreateGroup={createGroupChat}
           />
         );
       case "radar":
@@ -272,6 +275,7 @@ function App() {
             peers={peers}
             onOpenChat={handleOpenChat}
             onNewChat={() => setActiveTab("contacts")}
+            onCreateGroup={createGroupChat}
           />
         );
     }
@@ -279,7 +283,7 @@ function App() {
 
   return (
     <div
-      className={`flex flex-col h-screen w-full relative overflow-hidden bg-background text-foreground ${theme === "dark" ? "dark" : ""}`}
+      className={`flex flex-col h-screen w-full relative overflow-hidden bg-background text-foreground ${theme !== "light" ? "dark" : ""}`}
     >
       {updateVersion && (
         <div className="bg-blue-600 text-white px-4 py-3 flex justify-between items-center gap-3 z-[110] text-sm font-medium border-b border-black/10">
@@ -393,6 +397,13 @@ function App() {
             <ChatView
               chatId={activeChat.chatId}
               chatName={activeChat.peerName}
+              peerId={chats.find(item => item.id === activeChat.chatId)?.peerId}
+              chatKind={chats.find(item => item.id === activeChat.chatId)?.kind}
+              groupMembersCount={chats.find(item => item.id === activeChat.chatId)?.members?.length}
+              peerVerified={peers.find(peer => {
+                const chat = chats.find(item => item.id === activeChat.chatId);
+                return !!chat && (peerIdsMatch(peer.id, chat.peerId) || peerIdsMatch(peer.id, chat.id));
+              })?.verified}
               messages={messagesForChat(activeChat.chatId)}
               onBack={handleBackFromChat}
               onSend={sendMessage}

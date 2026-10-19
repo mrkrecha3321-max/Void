@@ -16,6 +16,7 @@ object BleFrameCodec {
     const val MAX_CHUNKS_V1 = 255
     const val MAX_CHUNKS = BleLinkPolicy.MAX_CHUNKS_V2
     const val MAX_MESSAGE_BYTES = BleLinkPolicy.MAX_MESSAGE_BYTES
+    const val MAX_MEDIA_MESSAGE_BYTES = BleLinkPolicy.MAX_MEDIA_MESSAGE_BYTES
     const val MAX_FRAME_PAYLOAD = BleLinkPolicy.MAX_FRAME_PAYLOAD
     private const val MARKER_V1: Byte = 0x00
     private const val MARKER_V2: Byte = 0x01
@@ -51,10 +52,25 @@ object BleFrameCodec {
         }
     }
 
-    // Kept for receiving and compatibility tests with releases 0.2.2-0.2.5.
+    fun encodeAdaptive(
+        message: ByteArray,
+        messageId: Int,
+        mtu: Int = BleLinkPolicy.DEFAULT_MTU
+    ): List<ByteArray> {
+        if (message.isEmpty() || message.size > MAX_MEDIA_MESSAGE_BYTES || messageId !in 0..0xFFFF) {
+            return emptyList()
+        }
+        return if (message.size <= MAX_MESSAGE_BYTES) {
+            encode(message, messageId)
+        } else {
+            encode(message, messageId, mtu)
+        }
+    }
+
+    // Kept for receiving, media envelopes (> 4080 B), and compatibility tests with releases 0.2.2-0.2.5.
     fun encode(message: ByteArray, messageId: Int, mtu: Int): List<ByteArray> {
         val chunk = payloadCapacityForMtu(mtu)
-        if (message.isEmpty() || message.size > MAX_MESSAGE_BYTES || messageId !in 0..0xFFFF) {
+        if (message.isEmpty() || message.size > MAX_MEDIA_MESSAGE_BYTES || messageId !in 0..0xFFFF) {
             return emptyList()
         }
         val totalChunks = (message.size + chunk - 1) / chunk

@@ -3,8 +3,13 @@ import {
   confirmInbox,
   listPendingInbox,
   loadChatState,
+  meshCreateGroup,
+  meshListGroups,
   meshRetryMessage,
+  meshSendChannelMessage,
+  meshSendGroupMessage,
   meshSendText,
+  onGroupInvited,
   onMessageAckReceived,
   onMessageReceived,
   onMessageTransportFailed,
@@ -12,8 +17,54 @@ import {
   onPeerDiscovered,
   saveChatState,
 } from '../api';
-import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload, InboxMessagePayload } from '../types';
+import type { Chat, Message, MessageReceivedPayload, PeerDiscoveredPayload, MessageAckPayload, InboxMessagePayload, GroupInfo } from '../types';
 import { peerIdsMatch, preferFullPeerId } from '../peerLink';
+import { playPttClick, playRogerBeep } from '../utils/tacticalAudio';
+
+const DEFAULT_CHANNELS: Array<{ peerId: string; peerName: string }> = [
+  { peerId: '#ogolny', peerName: '#ogolny — Kanał Ogólny' },
+  { peerId: '#pomoc', peerName: '#pomoc — Wsparcie w Terenie' },
+  { peerId: '#ratownictwo', peerName: '#ratownictwo — Sztab Ratunkowy' },
+];
+
+const ensureDefaultChannelsAndGroups = (existingChats: Chat[], groups: GroupInfo[]): Chat[] => {
+  const result = [...existingChats];
+  for (const ch of DEFAULT_CHANNELS) {
+    const idx = result.findIndex(c => c.peerId.toLowerCase() === ch.peerId.toLowerCase());
+    if (idx === -1) {
+      result.push({
+        id: `channel-${ch.peerId.slice(1)}`,
+        peerId: ch.peerId,
+        peerName: ch.peerName,
+        unreadCount: 0,
+        kind: 'channel',
+      });
+    } else if (!result[idx].kind) {
+      result[idx] = { ...result[idx], kind: 'channel' };
+    }
+  }
+  for (const grp of groups) {
+    const idx = result.findIndex(c => c.peerId === grp.groupId);
+    if (idx === -1) {
+      result.unshift({
+        id: `group-${grp.groupId}`,
+        peerId: grp.groupId,
+        peerName: grp.name,
+        unreadCount: 0,
+        kind: 'group',
+        members: grp.members,
+      });
+    } else {
+      result[idx] = {
+        ...result[idx],
+        peerName: grp.name || result[idx].peerName,
+        kind: 'group',
+        members: grp.members,
+      };
+    }
+  }
+  return result;
+};
 
 const localId = (prefix: string): string => {
   const uuid = globalThis.crypto?.randomUUID?.();
@@ -34,7 +85,7 @@ const pruneExpiredMessages = (messages: Record<string, Message[]>): Record<strin
 };
 
 export function useChats() {
-  const [chats, setChats] = useState<Chat[]>([]);
+  const [chats, setChats] = useState<Chat[]>(() => ensureDefaultChannelsAndGroups([], []));
   const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [hydrated, setHydrated] = useState(false);
 
@@ -52,7 +103,7 @@ export function useChats() {
     );
   }, []);
 
-  const ingestIncoming = useCallback((payload: InboxMessagePayload | MessageReceivedPayload) => {
+  const ingestIncoming = useCallback((payload: InboxMessagePayload | MessageReceivedPayload, isLiveEvent = false) => {
     // Until encrypted history is loaded, the durable Rust inbox remains the
     // source of truth. Ingesting a live event earlier could be overwritten by
     // hydration and then skipped as a duplicate during the inbox drain.
@@ -60,16 +111,24 @@ export function useChats() {
     const incomingId = String(payload.id || localId('received-message'));
     if (acceptedIncomingIdsRef.current.has(incomingId)) return;
     acceptedIncomingIdsRef.current.add(incomingId);
+    if (isLiveEvent) {
+      playRogerBeep();
+    }
 
     const msgDate = new Date(payload.timestamp);
     const timestamp = isNaN(msgDate.getTime()) ? new Date() : msgDate;
+    const isChannel = payload.peerId.startsWith('#');
+    const isGroup = payload.peerId.startsWith('GRP-');
+    const resolvedKind: 'direct' | 'channel' | 'group' = isChannel ? 'channel' : isGroup ? 'group' : 'direct';
+
     let existing = findChat(payload.peerId);
     if (!existing) {
       existing = {
-        id: localId('chat'),
+        id: isChannel ? `channel-${payload.peerId.slice(1)}` : isGroup ? `group-${payload.peerId}` : localId('chat'),
         peerId: payload.peerId,
         peerName: payload.peerId,
         unreadCount: 0,
+        kind: resolvedKind,
       };
       // Update synchronously so a burst drained from the durable inbox cannot
       // create multiple chats for the same peer before React flushes state.
@@ -84,6 +143,8 @@ export function useChats() {
       text: payload.text,
       sent: false,
       timestamp,
+      senderId: payload.senderId || (!isChannel && !isGroup ? payload.peerId : undefined),
+      senderName: payload.senderName,
     };
 
     setMessages(prev => {
@@ -111,6 +172,7 @@ export function useChats() {
                 lastMessage: payload.text,
                 lastMessageTime: timestamp,
                 unreadCount: c.unreadCount + 1,
+                kind: c.kind || resolvedKind,
               }
             : c
         );
@@ -124,6 +186,7 @@ export function useChats() {
         lastMessage: payload.text,
         lastMessageTime: timestamp,
         unreadCount: 1,
+        kind: resolvedKind,
       };
       const updated = [newChat, ...prev];
       chatsRef.current = updated;
@@ -136,7 +199,7 @@ export function useChats() {
     try {
       const pending = await listPendingInbox();
       if (!active || !Array.isArray(pending)) return;
-      pending.forEach(ingestIncoming);
+      pending.forEach(item => ingestIncoming(item, false));
     } catch (error) {
       console.warn('Nie udało się odczytać trwałego inbox:', error);
     }
@@ -151,22 +214,29 @@ export function useChats() {
         return;
       }
       try {
-        const stored = await loadChatState();
+        const [stored, groups] = await Promise.all([
+          loadChatState(),
+          meshListGroups().catch(() => [] as GroupInfo[]),
+        ]);
         if (!active) return;
-        const restoredChats = Array.isArray(stored.chats)
+        const rawChats = Array.isArray(stored.chats)
           ? (stored.chats as Chat[]).filter(chat =>
               chat && typeof chat.id === 'string' && typeof chat.peerId === 'string'
             ).slice(0, 500)
           : [];
+        const restoredChats = ensureDefaultChannelsAndGroups(rawChats, groups);
         const restoredMessages: Record<string, Message[]> = {};
         if (stored.messages && typeof stored.messages === 'object') {
           for (const [chatId, candidate] of Object.entries(stored.messages)) {
             if (!Array.isArray(candidate)) continue;
             restoredMessages[chatId] = (candidate as Message[])
-              .filter(message =>
-                message && (typeof message.id === 'string' || typeof message.id === 'number') &&
-                typeof message.text === 'string' && message.text.length <= 2048
-              )
+              .filter(message => {
+                if (!message || (typeof message.id !== 'string' && typeof message.id !== 'number') || typeof message.text !== 'string') {
+                  return false;
+                }
+                const maxLen = message.text.startsWith('VOID_MEDIA:') ? 24576 : 2048;
+                return message.text.length <= maxLen;
+              })
               .slice(-500);
           }
         }
@@ -349,9 +419,32 @@ export function useChats() {
     deliveryTimersRef.current.set(msgId, timer);
   }, []);
 
+  const createGroupChat = useCallback(async (name: string, members: string[]): Promise<Chat> => {
+    const group = await meshCreateGroup(name, members);
+    const chatId = `group-${group.groupId}`;
+    const newChat: Chat = {
+      id: chatId,
+      peerId: group.groupId,
+      peerName: group.name,
+      unreadCount: 0,
+      kind: 'group',
+      members: group.members,
+    };
+    setChats(prev => {
+      const existingIdx = prev.findIndex(c => c.peerId === group.groupId);
+      const updated = existingIdx >= 0
+        ? prev.map((c, idx) => (idx === existingIdx ? { ...c, ...newChat } : c))
+        : [newChat, ...prev];
+      chatsRef.current = updated;
+      return updated;
+    });
+    return newChat;
+  }, []);
+
   const sendMessage = useCallback(async (chatId: string, text: string) => {
     const chat = chatsRef.current.find(c => c.id === chatId);
     const recipientId = chat?.peerId || chatId;
+    playPttClick();
     
     const tempId = localId('pending-message');
     const msg: Message = {
@@ -378,7 +471,11 @@ export function useChats() {
     );
     
     try {
-      const result = await meshSendText(recipientId, text);
+      const result = recipientId.startsWith('#')
+        ? await meshSendChannelMessage(recipientId, text)
+        : recipientId.startsWith('GRP-')
+        ? await meshSendGroupMessage(recipientId, text)
+        : await meshSendText(recipientId, text);
       const status = result.status === 'transmitting' || !result.queued ? 'transmitting' : 'queued';
       setMessages(prev => ({
         ...prev,
@@ -467,7 +564,16 @@ export function useChats() {
 
   useEffect(() => {
     const unlistenPromise = onMessageReceived((payload: MessageReceivedPayload) => {
-      ingestIncoming(payload);
+      ingestIncoming(payload, true);
+    });
+
+    const unlistenGroupPromise = onGroupInvited((group: GroupInfo) => {
+      playRogerBeep();
+      setChats(prev => {
+        const updated = ensureDefaultChannelsAndGroups(prev, [group]);
+        chatsRef.current = updated;
+        return updated;
+      });
     });
 
     const unlistenAckPromise = onMessageAckReceived((payload: MessageAckPayload) => {
@@ -535,6 +641,7 @@ export function useChats() {
 
     return () => {
       unlistenPromise.then(unlisten => unlisten && unlisten());
+      unlistenGroupPromise.then(unlisten => unlisten && unlisten());
       unlistenAckPromise.then(unlisten => unlisten && unlisten());
       transportSentPromise.then(unlisten => unlisten && unlisten());
       transportFailedPromise.then(unlisten => unlisten && unlisten());
@@ -587,11 +694,13 @@ export function useChats() {
   }, [armDeliveryTimer, sendMessage]);
 
   const clearAllData = useCallback(() => {
-    setChats([]);
+    const resetChats = ensureDefaultChannelsAndGroups([], []);
+    setChats(resetChats);
     setMessages({});
-    chatsRef.current = [];
+    chatsRef.current = resetChats;
     acceptedIncomingIdsRef.current.clear();
   }, []);
 
-  return { chats, messages, messagesForChat, sendMessage, receiveMessage, startChat, markRead, retryMessage, clearAllData };
+  return { chats, messages, messagesForChat, sendMessage, receiveMessage, startChat, createGroupChat, markRead, retryMessage, clearAllData };
 }
+

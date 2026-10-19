@@ -14,8 +14,11 @@ use std::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
 const VAULT_VERSION: u8 = 2;
-const MAX_VAULT_BYTES: usize = 8 * 1024 * 1024;
-const MAX_CHAT_STATE_BYTES: usize = 1024 * 1024;
+const MAX_VAULT_BYTES: usize = 24 * 1024 * 1024;
+const MAX_CHAT_STATE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DTN_BYTES: usize = 50 * 1024 * 1024;
+const MAX_DTN_ITEMS: usize = 4_096;
+const MAX_GROUPS: usize = 256;
 const MAX_PEERS: usize = 2_048;
 const MAX_OUTBOX: usize = 500;
 const MAX_INBOX: usize = 1_000;
@@ -55,7 +58,30 @@ pub struct PeerPinRecord {
     pub encryption_public_b64: String,
     pub name: String,
     pub trusted: bool,
+    #[serde(default)]
+    pub verified: bool,
     pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRecord {
+    pub group_id: String,
+    pub name: String,
+    pub key_b64: String,
+    pub members: Vec<String>,
+    pub created_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DtnTransitRecord {
+    pub msg_id: String,
+    pub recipient_id: String,
+    pub sender_id: String,
+    pub envelope_json: String,
+    pub created_at_ms: u64,
+    pub stored_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +125,8 @@ struct VaultData {
     pub peer_pins: HashMap<String, PeerPinRecord>,
     pub trusted_contact_ids: HashSet<String>,
     pub contact_names: HashMap<String, String>,
+    #[serde(default)]
+    pub groups: HashMap<String, GroupRecord>,
     pub outbox: Vec<OutboxRecord>,
     #[serde(default)]
     pub inbox: Vec<InboxRecord>,
@@ -113,6 +141,7 @@ impl Default for VaultData {
             peer_pins: HashMap::new(),
             trusted_contact_ids: HashSet::new(),
             contact_names: HashMap::new(),
+            groups: HashMap::new(),
             outbox: Vec::new(),
             inbox: Vec::new(),
             chat_state: serde_json::json!({ "chats": [], "messages": {} }),
@@ -138,11 +167,13 @@ struct SealedReplayRecord {
 struct StoreState {
     data: VaultData,
     replay_ids: VecDeque<ReplayRecord>,
+    dtn_transit: VecDeque<DtnTransitRecord>,
 }
 
 pub struct SecureStore {
     vault_path: PathBuf,
     replay_path: PathBuf,
+    dtn_path: PathBuf,
     key: Zeroizing<[u8; 32]>,
     state: Mutex<StoreState>,
     replay_io: Mutex<()>,
@@ -152,14 +183,21 @@ pub struct SecureStore {
 impl SecureStore {
     pub fn open(vault_path: PathBuf, key: [u8; 32], now_ms: u64) -> Result<Self, String> {
         let replay_path = vault_path.with_file_name("replay-v2.log");
+        let dtn_path = vault_path.with_file_name("dtn-v2.json");
         let key = Zeroizing::new(key);
         let data = load_vault(&vault_path, &key)?;
         let replay_ids = load_replay(&replay_path, &key, now_ms)?;
+        let dtn_transit = load_dtn(&dtn_path, &key, now_ms).unwrap_or_default();
         let store = Self {
             vault_path,
             replay_path,
+            dtn_path,
             key,
-            state: Mutex::new(StoreState { data, replay_ids }),
+            state: Mutex::new(StoreState {
+                data,
+                replay_ids,
+                dtn_transit,
+            }),
             replay_io: Mutex::new(()),
             fail_next_persist: AtomicBool::new(false),
         };
@@ -251,6 +289,7 @@ impl SecureStore {
             if existing.signing_public_b64 != pin.signing_public_b64 {
                 return Err("Proba zmiany przypietego klucza podpisujacego".to_string());
             }
+            pin.verified |= existing.verified;
         }
         if pin.trusted {
             state
@@ -280,6 +319,29 @@ impl SecureStore {
         self.persist_locked(&state.data)
     }
 
+    pub fn set_peer_verified(&self, node_id: &str, verified: bool) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if let Some(pin) = state.data.peer_pins.get_mut(node_id) {
+            pin.verified = verified;
+            if verified {
+                pin.trusted = true;
+                state.data.trusted_contact_ids.insert(node_id.to_string());
+            }
+        } else {
+            return Err("Brak przypietego klucza dla wybranego wezla".to_string());
+        }
+        self.persist_locked(&state.data)
+    }
+
+    pub fn is_peer_verified(&self, node_id: &str) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .data
+            .peer_pins
+            .get(node_id)
+            .is_some_and(|pin| pin.verified)
+    }
+
     pub fn is_peer_trusted(&self, node_id: &str) -> bool {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.data.trusted_contact_ids.contains(node_id)
@@ -288,6 +350,40 @@ impl SecureStore {
                 .peer_pins
                 .get(node_id)
                 .is_some_and(|pin| pin.trusted)
+    }
+
+    pub fn groups(&self) -> Vec<GroupRecord> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .groups
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    pub fn group(&self, group_id: &str) -> Option<GroupRecord> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .data
+            .groups
+            .get(group_id)
+            .cloned()
+    }
+
+    pub fn upsert_group(&self, group: GroupRecord) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        if state.data.groups.len() >= MAX_GROUPS && !state.data.groups.contains_key(&group.group_id)
+        {
+            return Err("Osiagnieto limit grup szyfrowanych".to_string());
+        }
+        let mut next = state.data.clone();
+        next.groups.insert(group.group_id.clone(), group);
+        self.persist_locked(&next)?;
+        state.data = next;
+        Ok(())
     }
 
     pub fn replay_ids(&self) -> Vec<String> {
@@ -400,7 +496,14 @@ impl SecureStore {
     /// Persist a decrypted, verified message. Returns Ok(true) when newly
     /// stored, Ok(false) when the same msgId is already in inbox or history.
     pub fn enqueue_inbox(&self, item: InboxRecord) -> Result<bool, String> {
-        if item.text.len() > 2_048 || item.msg_id.len() > 64 || item.peer_id.len() > 64 {
+        let max_text_len = if item.text.starts_with("VOID_MEDIA:")
+            || item.text.starts_with("VOID_GROUP_INVITE:")
+        {
+            24_576
+        } else {
+            2_048
+        };
+        if item.text.len() > max_text_len || item.msg_id.len() > 64 || item.peer_id.len() > 64 {
             return Err("Nieprawidlowy rekord inbox".to_string());
         }
         let mut state = self.state.lock().map_err(|e| e.to_string())?;
@@ -450,7 +553,7 @@ impl SecureStore {
     }
 
     pub fn enqueue_outbox(&self, item: OutboxRecord) -> Result<(), String> {
-        if item.envelope_json.len() > 4_080 {
+        if item.envelope_json.len() > 24_576 {
             return Err("Koperta outbox jest zbyt duza".to_string());
         }
         let mut state = self.state.lock().map_err(|e| e.to_string())?;
@@ -470,6 +573,68 @@ impl SecureStore {
         self.persist_locked(&next)?;
         state.data = next;
         Ok(())
+    }
+
+    pub fn enqueue_dtn_transit(&self, item: DtnTransitRecord, now_ms: u64) -> Result<bool, String> {
+        if item.envelope_json.len() > 24_576 || item.msg_id.len() > 64 {
+            return Err("Nieprawidlowy rekord DTN transit".to_string());
+        }
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        state
+            .dtn_transit
+            .retain(|rec| now_ms.saturating_sub(rec.created_at_ms) <= REPLAY_MAX_AGE_MS);
+        if state
+            .dtn_transit
+            .iter()
+            .any(|queued| queued.msg_id == item.msg_id)
+        {
+            return Ok(false);
+        }
+        while state.dtn_transit.len() >= MAX_DTN_ITEMS {
+            state.dtn_transit.pop_front();
+        }
+        state.dtn_transit.push_back(item);
+        while serde_json::to_vec(&state.dtn_transit)
+            .map(|v| v.len())
+            .unwrap_or(0)
+            > MAX_DTN_BYTES / 2
+            && !state.dtn_transit.is_empty()
+        {
+            state.dtn_transit.pop_front();
+        }
+        self.persist_dtn_locked(&state.dtn_transit)?;
+        Ok(true)
+    }
+
+    pub fn dtn_transit_items(&self, now_ms: u64) -> Vec<DtnTransitRecord> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .dtn_transit
+            .iter()
+            .filter(|rec| now_ms.saturating_sub(rec.created_at_ms) <= REPLAY_MAX_AGE_MS)
+            .cloned()
+            .collect()
+    }
+
+    pub fn remove_dtn_transit(&self, msg_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|e| e.to_string())?;
+        let prev_len = state.dtn_transit.len();
+        state.dtn_transit.retain(|rec| rec.msg_id != msg_id);
+        if state.dtn_transit.len() != prev_len {
+            self.persist_dtn_locked(&state.dtn_transit)?;
+        }
+        Ok(())
+    }
+
+    pub fn dtn_stats(&self, now_ms: u64) -> (usize, usize) {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let active: Vec<&DtnTransitRecord> = state
+            .dtn_transit
+            .iter()
+            .filter(|rec| now_ms.saturating_sub(rec.created_at_ms) <= REPLAY_MAX_AGE_MS)
+            .collect();
+        let bytes: usize = active.iter().map(|rec| rec.envelope_json.len()).sum();
+        (active.len(), bytes)
     }
 
     pub fn outbox_item(&self, msg_id: &str) -> Option<OutboxRecord> {
@@ -576,9 +741,11 @@ impl SecureStore {
         let _io_guard = self.replay_io.lock().map_err(|e| e.to_string())?;
         secure_remove(&self.vault_path)?;
         secure_remove(&self.replay_path)?;
+        secure_remove(&self.dtn_path)?;
         let mut state = self.state.lock().map_err(|e| e.to_string())?;
         state.data = VaultData::default();
         state.replay_ids.clear();
+        state.dtn_transit.clear();
         Ok(())
     }
 
@@ -595,6 +762,16 @@ impl SecureStore {
         }
         atomic_write(&self.vault_path, &serialized)
     }
+
+    fn persist_dtn_locked(&self, dtn: &VecDeque<DtnTransitRecord>) -> Result<(), String> {
+        let plaintext = serde_json::to_vec(dtn).map_err(|e| e.to_string())?;
+        let envelope = seal_bytes(&self.key, &plaintext)?;
+        let serialized = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        if serialized.len() > MAX_DTN_BYTES {
+            return Err("Zaszyfrowany bufor DTN przekracza limit 50 MB".to_string());
+        }
+        atomic_write(&self.dtn_path, &serialized)
+    }
 }
 
 fn validate_vault_data(data: &VaultData) -> Result<(), String> {
@@ -604,12 +781,40 @@ fn validate_vault_data(data: &VaultData) -> Result<(), String> {
     if data.peer_pins.len() > MAX_PEERS
         || data.trusted_contact_ids.len() > MAX_PEERS
         || data.contact_names.len() > MAX_PEERS
+        || data.groups.len() > MAX_GROUPS
         || data.outbox.len() > MAX_OUTBOX
         || data.inbox.len() > MAX_INBOX
     {
         return Err("Vault przekracza limity rekordow".to_string());
     }
     validate_chat_shape(&data.chat_state)
+}
+
+fn load_dtn(
+    path: &Path,
+    key: &[u8; 32],
+    now_ms: u64,
+) -> Result<VecDeque<DtnTransitRecord>, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(VecDeque::new()),
+        Err(error) => return Err(format!("Nie mozna odczytac bufora DTN: {error}")),
+    };
+    if bytes.len() > MAX_DTN_BYTES {
+        return Err("Bufor DTN jest zbyt duzy".to_string());
+    }
+    let envelope: VaultEnvelope = serde_json::from_slice(&bytes)
+        .map_err(|_| "Bufor DTN ma nieprawidlowy format".to_string())?;
+    if envelope.version != VAULT_VERSION {
+        return Err("Nieobslugiwana wersja bufora DTN".to_string());
+    }
+    let mut plaintext = open_bytes(key, &envelope)?;
+    let records = serde_json::from_slice::<VecDeque<DtnTransitRecord>>(&plaintext)
+        .map_err(|_| "Nie mozna odszyfrowac zawartosci bufora DTN".to_string());
+    plaintext.zeroize();
+    let mut records = records?;
+    records.retain(|rec| now_ms.saturating_sub(rec.created_at_ms) <= REPLAY_MAX_AGE_MS);
+    Ok(records)
 }
 
 fn collect_history_ids(chat_state: &serde_json::Value) -> HashSet<String> {

@@ -12,6 +12,10 @@ import type {
   CoreMeshSettings,
   InboxMessagePayload,
   PeerLinkPayload,
+  GroupInvitedPayload,
+  GroupRecord,
+  SafetyNumberInfo,
+  MeshDiagnostics,
 } from './types';
 
 export type { UnlistenFn };
@@ -74,6 +78,8 @@ const subscribe = async <T>(
 
 export const onMessageReceived = (callback: (payload: MessageReceivedPayload) => void) =>
   subscribe('message_received', callback);
+export const onGroupInvited = (callback: (payload: GroupInvitedPayload) => void) =>
+  subscribe('group_invited', callback);
 export const onPeerDiscovered = (callback: (payload: PeerDiscoveredPayload) => void) =>
   subscribe('peer_discovered', callback);
 export const onPeerStatus = (callback: (payload: PeerStatusPayload) => void) =>
@@ -113,6 +119,48 @@ export const bleConnectToPeer = (address: string): Promise<boolean> =>
 export const meshGetPublicKey = (): Promise<string> => invoke('mesh_get_public_key');
 export const meshSendText = (recipientId: string, text: string): Promise<MeshSendResult> =>
   invoke('mesh_send_text', { recipientId, text });
+export const meshSendChannelMessage = (
+  channelId: string,
+  text: string,
+): Promise<MeshSendResult> => invoke('mesh_send_channel_message', { channelId, text });
+export const meshCreateGroup = (
+  name: string,
+  members: string[],
+): Promise<GroupRecord> => invoke('mesh_create_group', { name, members });
+export const meshListGroups = async (): Promise<GroupRecord[]> => {
+  try {
+    return await invoke<GroupRecord[]>('mesh_list_groups');
+  } catch {
+    return [];
+  }
+};
+export const meshSendGroupMessage = (
+  groupId: string,
+  text: string,
+): Promise<MeshSendResult> => invoke('mesh_send_group_message', { groupId, text });
+export const getSafetyNumber = (peerId: string): Promise<SafetyNumberInfo> =>
+  invoke('get_safety_number', { peerId });
+export const setPeerVerified = async (peerId: string, verified: boolean): Promise<void> => {
+  await invoke('set_peer_verified', { peerId, verified });
+  window.dispatchEvent(new CustomEvent('void-peer-verified', { detail: { peerId, verified } }));
+};
+export const onPeerVerified = (
+  callback: (payload: { peerId: string; verified: boolean }) => void,
+): Promise<UnlistenFn | undefined> => {
+  const handler = (event: Event) => {
+    const custom = event as CustomEvent<{ peerId: string; verified: boolean }>;
+    if (custom.detail) callback(custom.detail);
+  };
+  window.addEventListener('void-peer-verified', handler);
+  return Promise.resolve(() => window.removeEventListener('void-peer-verified', handler));
+};
+export const getMeshDiagnostics = async (): Promise<MeshDiagnostics | null> => {
+  try {
+    return await invoke<MeshDiagnostics>('get_mesh_diagnostics');
+  } catch {
+    return null;
+  }
+};
 export const meshSendLocation = (
   recipientId: string,
   lat: number,
@@ -155,3 +203,4 @@ export const onBlePeerDisconnected = (callback: (payload: { address: string }) =
   subscribe('ble_peer_disconnected', callback);
 export const onBleError = (callback: (payload: { message: string }) => void) =>
   subscribe('ble_error', callback);
+

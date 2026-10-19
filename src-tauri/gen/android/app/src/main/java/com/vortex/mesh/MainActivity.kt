@@ -1,6 +1,10 @@
 package com.vortex.mesh
 
+import android.bluetooth.BluetoothAdapter
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -12,6 +16,34 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var btReceiverRegistered = false
+
+  private val bluetoothStateReceiver = object : BroadcastReceiver() {
+    override fun onReceive(context: Context?, intent: Intent?) {
+      if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+      when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+        BluetoothAdapter.STATE_ON -> {
+          android.util.Log.i("MainActivity", "Bluetooth STATE_ON received; resuming mesh")
+          try {
+            BleManager.onBluetoothEnabled(this@MainActivity.applicationContext)
+            NativeBridge.onPermissionsGranted()
+          } catch (error: Throwable) {
+            android.util.Log.w("MainActivity", "Bluetooth STATE_ON handler failed", error)
+          }
+        }
+        BluetoothAdapter.STATE_OFF -> {
+          android.util.Log.i("MainActivity", "Bluetooth STATE_OFF received; pausing mesh")
+          try {
+            BleManager.onBluetoothDisabled()
+            NativeBridge.onBleError("Bluetooth został wyłączony — włącz Bluetooth, aby wznowić sieć Mesh")
+          } catch (error: Throwable) {
+            android.util.Log.w("MainActivity", "Bluetooth STATE_OFF handler failed", error)
+          }
+        }
+      }
+    }
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     instance = this
@@ -21,6 +53,12 @@ class MainActivity : TauriActivity() {
       NativeBridge.setClassLoader(this.classLoader)
     } catch (error: Throwable) {
       android.util.Log.e("MainActivity", "NativeBridge init failed", error)
+    }
+    try {
+      registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
+      btReceiverRegistered = true
+    } catch (error: Throwable) {
+      android.util.Log.w("MainActivity", "Failed to register Bluetooth state receiver", error)
     }
     try {
       enableEdgeToEdge()
@@ -142,6 +180,7 @@ class MainActivity : TauriActivity() {
     super.onResume()
     instance = this
     try { BleManager.ensureForegroundService(this) } catch (_: Throwable) {}
+    try { BleManager.notifyUserActivity(this) } catch (_: Throwable) {}
     try {
       val pending = ApkInstaller.retryPending(this)
       if (pending == ApkInstaller.NEED_PERMISSION) {
@@ -169,13 +208,41 @@ class MainActivity : TauriActivity() {
   override fun onDestroy() {
     // BLE is owned by MeshForegroundService so Activity teardown must not
     // tear down scan/advertise/GATT. That is what killed background delivery.
+    if (btReceiverRegistered) {
+      try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Throwable) {}
+      btReceiverRegistered = false
+    }
     if (instance === this) instance = null
     super.onDestroy()
   }
 
   companion object {
     private const val BLE_PERMISSION_REQUEST = 4201
+    private const val BT_ENABLE_REQUEST = 4202
     @Volatile private var instance: MainActivity? = null
+    @Volatile private var lastBtEnablePromptMs: Long = 0L
     @JvmStatic fun currentActivity(): MainActivity? = instance
+
+    @JvmStatic
+    fun requestBluetoothEnable() {
+      val now = System.currentTimeMillis()
+      if (now - lastBtEnablePromptMs < 15_000L) return
+      val act = instance ?: return
+      if (Build.VERSION.SDK_INT >= 31 &&
+        ContextCompat.checkSelfPermission(act, android.Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED
+      ) {
+        return
+      }
+      lastBtEnablePromptMs = now
+      act.runOnUiThread {
+        try {
+          val enableIntent = Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE)
+          @Suppress("DEPRECATION")
+          act.startActivityForResult(enableIntent, BT_ENABLE_REQUEST)
+        } catch (error: Throwable) {
+          android.util.Log.w("MainActivity", "ACTION_REQUEST_ENABLE failed", error)
+        }
+      }
+    }
   }
 }

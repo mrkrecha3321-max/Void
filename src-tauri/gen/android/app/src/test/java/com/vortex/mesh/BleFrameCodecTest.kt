@@ -97,4 +97,26 @@ class BleFrameCodecTest {
         assertEquals(2, decoded!!.version)
         assertEquals("hello-world", decoded.payload.toString(Charsets.UTF_8))
     }
+
+    @Test
+    fun adaptiveEncodingSupports20KbMediaPayload() {
+        val mediaPayload = ByteArray(20_000) { idx -> ((idx * 31) and 0xFF).toByte() }
+        for (mtu in listOf(23, 185)) {
+            val frames = BleFrameCodec.encodeAdaptive(mediaPayload, 0x4242, mtu)
+            assertTrue(frames.isNotEmpty())
+            if (mtu == 23) {
+                assertTrue(frames.size > 255)
+            }
+            val decoded = frames.map { frame ->
+                BleFrameCodec.decode(frame) ?: throw AssertionError("v2 media frame must decode")
+            }
+            assertTrue(decoded.all { it.version == 2 })
+            val restored = decoded
+                .sortedBy { it.chunkIndex }
+                .flatMap { it.payload.asIterable() }
+                .toByteArray()
+            assertArrayEquals(mediaPayload, restored)
+        }
+    }
 }
+

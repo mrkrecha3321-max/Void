@@ -3,7 +3,10 @@ use crate::native_bridge;
 use crate::reliability::{
     should_attempt_outbox, MAX_TRANSPORT_ATTEMPTS_PER_MINUTE, TRANSPORT_RATE_WINDOW_MS,
 };
-use crate::storage::{CoreSettings, InboxRecord, OutboxRecord, PeerPinRecord, SecureStore};
+use crate::storage::{
+    CoreSettings, DtnTransitRecord, GroupRecord, InboxRecord, OutboxRecord, PeerPinRecord,
+    SecureStore,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use ed25519_dalek::SigningKey;
 use serde::{Deserialize, Serialize};
@@ -16,14 +19,16 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 pub const PROTOCOL_VERSION: u8 = 2;
 pub const MAX_TTL: u8 = 32;
-pub const MAX_ENVELOPE_BYTES: usize = 4_080;
+pub const MAX_ENVELOPE_BYTES: usize = 24_576;
 pub const MAX_TEXT_BYTES: usize = 2_048;
+pub const MAX_MEDIA_TEXT_BYTES: usize = 20_480;
 const MAX_NAME_BYTES: usize = 80;
 const MAX_DESCRIPTION_BYTES: usize = 200;
 const MAX_STATE_PEERS: usize = 2_048;
 const SEEN_CACHE_CAP: usize = 10_000;
 const MESSAGE_MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 const FUTURE_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
+const ROUTE_TTL_MS: u64 = 5 * 60 * 1_000;
 const RATE_WINDOW_MS: u64 = 10_000;
 const MAX_MESSAGES_PER_WINDOW: usize = 40;
 const SOS_COOLDOWN: Duration = Duration::from_secs(60);
@@ -49,6 +54,44 @@ pub struct DiscoveredPeer {
     pub full_id: Option<String>,
     pub name: String,
     pub rssi: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteEntry {
+    pub destination_id: String,
+    pub next_hop_address: String,
+    pub hop_count: u8,
+    pub rssi: i32,
+    pub updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshDiagnostics {
+    pub routes: Vec<RouteEntry>,
+    pub dtn_buffered_count: usize,
+    pub dtn_buffered_bytes: usize,
+    pub outbox_count: usize,
+    pub connected_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SafetyNumberInfo {
+    pub peer_id: String,
+    pub digits: String,
+    pub words: Vec<String>,
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupInvitePayload {
+    pub group_id: String,
+    pub name: String,
+    pub key_b64: String,
+    pub members: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +194,7 @@ pub struct MeshState {
     pub known_pubkeys: Mutex<HashMap<String, PublicKey>>,
     pub connected_addresses: Mutex<HashSet<String>>,
     pub discovered_peers: Mutex<HashMap<String, DiscoveredPeer>>,
+    pub routing_table: Mutex<HashMap<String, RouteEntry>>,
     pub settings: Mutex<CoreSettings>,
     pub store: Arc<SecureStore>,
     transport: Arc<dyn MeshTransport>,
@@ -210,6 +254,7 @@ impl MeshState {
             known_pubkeys: Mutex::new(known_pubkeys),
             connected_addresses: Mutex::new(HashSet::new()),
             discovered_peers: Mutex::new(HashMap::new()),
+            routing_table: Mutex::new(HashMap::new()),
             settings: Mutex::new(store.settings()),
             store,
             transport,
@@ -221,6 +266,73 @@ impl MeshState {
             transport_attempts: Mutex::new(VecDeque::new()),
             retry_scheduled: AtomicBool::new(false),
         }
+    }
+
+    pub fn learn_route(&self, destination_id: &str, from_address: &str, hop_count: u8) {
+        if from_address.is_empty() || destination_id == self.node_id {
+            return;
+        }
+        let rssi = self
+            .discovered_peers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(from_address)
+            .map(|p| p.rssi)
+            .unwrap_or(-65);
+        let now = now_ms();
+        let mut routes = self.routing_table.lock().unwrap_or_else(|e| e.into_inner());
+        if routes.len() >= MAX_STATE_PEERS && !routes.contains_key(destination_id) {
+            return;
+        }
+        let should_update = match routes.get(destination_id) {
+            None => true,
+            Some(existing) => {
+                now.saturating_sub(existing.updated_at_ms) > ROUTE_TTL_MS
+                    || hop_count < existing.hop_count
+                    || (hop_count == existing.hop_count && rssi >= existing.rssi)
+                    || existing.next_hop_address == from_address
+            }
+        };
+        if should_update {
+            routes.insert(
+                destination_id.to_string(),
+                RouteEntry {
+                    destination_id: destination_id.to_string(),
+                    next_hop_address: from_address.to_string(),
+                    hop_count: hop_count.max(1),
+                    rssi,
+                    updated_at_ms: now,
+                },
+            );
+        }
+    }
+
+    pub fn best_next_hop(
+        &self,
+        destination_id: &str,
+        exclude_address: Option<&str>,
+    ) -> Option<String> {
+        let connected = self
+            .connected_addresses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(direct) = self.find_address_by_peer_id(destination_id) {
+            if connected.contains(&direct) && Some(direct.as_str()) != exclude_address {
+                return Some(direct);
+            }
+        }
+        let now = now_ms();
+        let routes = self.routing_table.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(route) = routes.get(destination_id) {
+            if now.saturating_sub(route.updated_at_ms) <= ROUTE_TTL_MS
+                && connected.contains(&route.next_hop_address)
+                && Some(route.next_hop_address.as_str()) != exclude_address
+            {
+                return Some(route.next_hop_address.clone());
+            }
+        }
+        None
     }
 
     fn has_seen(&self, id: &str) -> bool {
@@ -290,6 +402,7 @@ impl MeshState {
                 .or_else(|| existing.as_ref().map(|value| value.name.clone()))
                 .unwrap_or_else(|| id.to_string()),
             trusted: existing.as_ref().is_some_and(|value| value.trusted),
+            verified: existing.as_ref().is_some_and(|value| value.verified),
             updated_at_ms,
         };
         let should_persist = existing.as_ref().is_none_or(|current| {
@@ -316,6 +429,10 @@ impl MeshState {
 
     pub fn clear_sensitive_state(&self) {
         self.known_pubkeys
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.routing_table
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -522,10 +639,83 @@ pub fn import_contact_card(state: &MeshState, card: &str) -> Result<ContactCardI
         return Err("Nie mozna zapisac pinu z wizytowki".to_string());
     }
     state.trust_peer(&body.node_id)?;
+    let _ = state.store.set_peer_verified(&body.node_id, true);
     Ok(ContactCardInfo {
         node_id: body.node_id.clone(),
         name: body.name.clone(),
     })
+}
+
+pub fn is_valid_channel_id(value: &str) -> bool {
+    value.starts_with('#')
+        && (2..=32).contains(&value.len())
+        && value.as_bytes()[1..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+}
+
+pub fn is_valid_group_id(value: &str) -> bool {
+    value.len() == 20
+        && value.starts_with("GRP-")
+        && value.as_bytes()[4..]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
+}
+
+pub fn get_safety_number(state: &MeshState, peer_id: &str) -> Result<SafetyNumberInfo, String> {
+    if !crypto::is_valid_node_id(peer_id) {
+        return Err("Nieprawidlowy Node ID peera".to_string());
+    }
+    let pin = state.store.peer_pin(peer_id).ok_or_else(|| {
+        "Brak klucza publicznego dla tego kontaktu (wymagane polaczenie lub wizytowka)".to_string()
+    })?;
+    let my_sig_b64 = crypto::signing_public_b64(&state.signing_identity.verifying_key());
+    let my_enc_b64 = crypto::encryption_public_b64(&state.public);
+    let (digits, words) = crypto::compute_safety_number(
+        &my_sig_b64,
+        &my_enc_b64,
+        &pin.signing_public_b64,
+        &pin.encryption_public_b64,
+    )?;
+    Ok(SafetyNumberInfo {
+        peer_id: peer_id.to_string(),
+        digits,
+        words,
+        verified: pin.verified,
+    })
+}
+
+pub fn set_peer_verified(state: &MeshState, peer_id: &str, verified: bool) -> Result<(), String> {
+    if !crypto::is_valid_node_id(peer_id) {
+        return Err("Nieprawidlowy Node ID peera".to_string());
+    }
+    state.store.set_peer_verified(peer_id, verified)
+}
+
+pub fn get_mesh_diagnostics(state: &MeshState) -> MeshDiagnostics {
+    let now = now_ms();
+    let routes: Vec<RouteEntry> = state
+        .routing_table
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .filter(|r| now.saturating_sub(r.updated_at_ms) <= ROUTE_TTL_MS)
+        .cloned()
+        .collect();
+    let (dtn_buffered_count, dtn_buffered_bytes) = state.store.dtn_stats(now);
+    let outbox_count = state.store.outbox(now).len();
+    let connected_count = state
+        .connected_addresses
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len();
+    MeshDiagnostics {
+        routes,
+        dtn_buffered_count,
+        dtn_buffered_bytes,
+        outbox_count,
+        connected_count,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -584,6 +774,20 @@ fn relay(
     exclude_address: Option<&str>,
 ) -> Result<usize, String> {
     let json = serialize_envelope(envelope)?;
+    let msg_id = &envelope.body.msg_id;
+
+    // AODV-lite unicast routing: if recipient is a specific node and we have a fresh
+    // route whose next hop is currently connected, try directed next-hop delivery first.
+    if crypto::is_valid_node_id(&envelope.body.recipient_id) {
+        if let Some(preferred_hop) =
+            state.best_next_hop(&envelope.body.recipient_id, exclude_address)
+        {
+            if let Ok(true) = state.transport.send(&preferred_hop, &json, msg_id) {
+                return Ok(1);
+            }
+        }
+    }
+
     let addresses: Vec<String> = state
         .connected_addresses
         .lock()
@@ -594,7 +798,6 @@ fn relay(
         .collect();
 
     let mut queued = 0;
-    let msg_id = &envelope.body.msg_id;
     for address in addresses {
         match state.transport.send(&address, &json, msg_id) {
             Ok(true) => queued += 1,
@@ -607,6 +810,32 @@ fn relay(
         }
     }
     Ok(queued)
+}
+
+pub fn flush_dtn_transit(state: &MeshState, target_address: Option<&str>) {
+    let relay_enabled = state
+        .settings
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .relay_node;
+    if !relay_enabled {
+        return;
+    }
+    let now = now_ms();
+    let items = state.store.dtn_transit_items(now);
+    for item in items {
+        let Ok(envelope) = serde_json::from_str::<MeshEnvelope>(&item.envelope_json) else {
+            let _ = state.store.remove_dtn_transit(&item.msg_id);
+            continue;
+        };
+        if let Some(addr) = target_address {
+            let _ = state
+                .transport
+                .send(addr, &item.envelope_json, &envelope.body.msg_id);
+        } else {
+            let _ = relay(state, &envelope, None);
+        }
+    }
 }
 
 pub fn send_presence(state: &MeshState, to_address: &str) -> Result<(), String> {
@@ -640,15 +869,21 @@ pub fn send_presence(state: &MeshState, to_address: &str) -> Result<(), String> 
     }
 }
 
+fn max_allowed_text_len(text: &str) -> usize {
+    if text.starts_with("VOID_MEDIA:") || text.starts_with("VOID_GROUP_INVITE:") {
+        MAX_MEDIA_TEXT_BYTES
+    } else {
+        MAX_TEXT_BYTES
+    }
+}
+
 pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<SendResult, String> {
     if !crypto::is_valid_node_id(recipient_id) {
         return Err("Nieprawidlowy Node ID odbiorcy".to_string());
     }
-    if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
-        return Err(format!(
-            "Wiadomosc musi miec od 1 do {} bajtow",
-            MAX_TEXT_BYTES
-        ));
+    let max_len = max_allowed_text_len(text);
+    if text.trim().is_empty() || text.len() > max_len {
+        return Err(format!("Wiadomosc musi miec od 1 do {} bajtow", max_len));
     }
     let public = state
         .known_pubkeys
@@ -685,6 +920,179 @@ pub fn send_text(state: &MeshState, recipient_id: &str, text: &str) -> Result<Se
         last_error: None,
     })?;
     let accepted = dispatch_outbox_item(state, &envelope.body.msg_id, false)? > 0;
+    Ok(SendResult {
+        msg_id: envelope.body.msg_id,
+        queued: !accepted,
+        status: if accepted {
+            "transmitting".to_string()
+        } else {
+            "queued".to_string()
+        },
+    })
+}
+
+pub fn send_channel_message(
+    state: &MeshState,
+    channel_id: &str,
+    text: &str,
+) -> Result<SendResult, String> {
+    let channel_id = channel_id.trim().to_ascii_lowercase();
+    if !is_valid_channel_id(&channel_id) {
+        return Err("Nieprawidlowy identyfikator kanalu (np. #ogolny)".to_string());
+    }
+    let max_len = max_allowed_text_len(text);
+    if text.trim().is_empty() || text.len() > max_len {
+        return Err(format!("Wiadomosc musi miec od 1 do {} bajtow", max_len));
+    }
+    let key = crypto::derive_channel_key(&channel_id);
+    let sender_name = truncate_utf8(
+        state
+            .node_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trim(),
+        MAX_NAME_BYTES,
+    );
+    let (ciphertext, nonce) = crypto::encrypt_with_key(&key, text)?;
+    let envelope = create_envelope(
+        state,
+        "channel",
+        &channel_id,
+        MAX_TTL,
+        Some(ciphertext),
+        Some(nonce),
+        Some(sender_name),
+        None,
+        None,
+    )?;
+    state.mark_seen(&envelope.body.msg_id, envelope.body.created_at_ms);
+    let envelope_json = serialize_envelope(&envelope)?;
+    let _ = state.store.enqueue_dtn_transit(
+        DtnTransitRecord {
+            msg_id: envelope.body.msg_id.clone(),
+            recipient_id: channel_id,
+            sender_id: state.node_id.clone(),
+            envelope_json,
+            created_at_ms: envelope.body.created_at_ms,
+            stored_at_ms: now_ms(),
+        },
+        now_ms(),
+    );
+    let accepted = relay(state, &envelope, None)? > 0;
+    Ok(SendResult {
+        msg_id: envelope.body.msg_id,
+        queued: !accepted,
+        status: if accepted {
+            "transmitting".to_string()
+        } else {
+            "queued".to_string()
+        },
+    })
+}
+
+pub fn create_group(
+    state: &MeshState,
+    name: &str,
+    mut members: Vec<String>,
+) -> Result<GroupRecord, String> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > MAX_NAME_BYTES {
+        return Err("Nazwa grupy musi miec od 1 do 80 znakow".to_string());
+    }
+    for member in &members {
+        if !crypto::is_valid_node_id(member) {
+            return Err(format!("Nieprawidlowy Node ID czlonka grupy: {member}"));
+        }
+    }
+    if !members.contains(&state.node_id) {
+        members.push(state.node_id.clone());
+    }
+    members.sort();
+    members.dedup();
+
+    let raw_uuid = uuid::Uuid::new_v4()
+        .simple()
+        .to_string()
+        .to_ascii_uppercase();
+    let group_id = format!("GRP-{}", &raw_uuid[..16]);
+    let key_b64 = crypto::generate_group_key();
+    let group = GroupRecord {
+        group_id: group_id.clone(),
+        name: name.to_string(),
+        key_b64: key_b64.clone(),
+        members: members.clone(),
+        created_at_ms: now_ms(),
+    };
+    state.store.upsert_group(group.clone())?;
+
+    let invite = GroupInvitePayload {
+        group_id,
+        name: name.to_string(),
+        key_b64,
+        members: members.clone(),
+    };
+    if let Ok(invite_json) = serde_json::to_string(&invite) {
+        let invite_msg = format!("VOID_GROUP_INVITE:{invite_json}");
+        for member_id in &members {
+            if member_id != &state.node_id {
+                let _ = send_text(state, member_id, &invite_msg);
+            }
+        }
+    }
+    Ok(group)
+}
+
+pub fn send_group_message(
+    state: &MeshState,
+    group_id: &str,
+    text: &str,
+) -> Result<SendResult, String> {
+    if !is_valid_group_id(group_id) {
+        return Err("Nieprawidlowy identyfikator grupy".to_string());
+    }
+    let max_len = max_allowed_text_len(text);
+    if text.trim().is_empty() || text.len() > max_len {
+        return Err(format!("Wiadomosc musi miec od 1 do {} bajtow", max_len));
+    }
+    let group = state
+        .store
+        .group(group_id)
+        .ok_or_else(|| "Nieznana grupa lub brak klucza grupowego".to_string())?;
+    let key = crypto::decode_group_key(&group.key_b64)?;
+    let sender_name = truncate_utf8(
+        state
+            .node_name
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trim(),
+        MAX_NAME_BYTES,
+    );
+    let (ciphertext, nonce) = crypto::encrypt_with_key(&key, text)?;
+    let envelope = create_envelope(
+        state,
+        "group",
+        group_id,
+        MAX_TTL,
+        Some(ciphertext),
+        Some(nonce),
+        Some(sender_name),
+        None,
+        None,
+    )?;
+    state.mark_seen(&envelope.body.msg_id, envelope.body.created_at_ms);
+    let envelope_json = serialize_envelope(&envelope)?;
+    let _ = state.store.enqueue_dtn_transit(
+        DtnTransitRecord {
+            msg_id: envelope.body.msg_id.clone(),
+            recipient_id: group_id.to_string(),
+            sender_id: state.node_id.clone(),
+            envelope_json,
+            created_at_ms: envelope.body.created_at_ms,
+            stored_at_ms: now_ms(),
+        },
+        now_ms(),
+    );
+    let accepted = relay(state, &envelope, None)? > 0;
     Ok(SendResult {
         msg_id: envelope.body.msg_id,
         queued: !accepted,
@@ -807,6 +1215,7 @@ fn send_ack(state: &MeshState, recipient_id: &str, ack_for_msg_id: &str) {
 
 pub fn flush_outbox(app: &AppHandle, state: &MeshState) {
     flush_outbox_inner(state, false);
+    flush_dtn_transit(state, None);
     emit_expired_outbox(app, state);
 }
 
@@ -1061,7 +1470,7 @@ fn validate_envelope(raw_json: &str) -> Result<ValidatedEnvelope, String> {
     let encrypted_fields_valid = body
         .ciphertext
         .as_ref()
-        .is_some_and(|value| !value.is_empty() && value.len() <= 3_200)
+        .is_some_and(|value| !value.is_empty() && value.len() <= 28_000)
         && body
             .nonce
             .as_ref()
@@ -1091,6 +1500,24 @@ fn validate_envelope(raw_json: &str) -> Result<ValidatedEnvelope, String> {
                 || body.sos.is_some()
             {
                 return Err("Nieprawidlowa zaszyfrowana koperta".to_string());
+            }
+        }
+        "channel" => {
+            if !is_valid_channel_id(&body.recipient_id)
+                || !encrypted_fields_valid
+                || body.ack_msg_id.is_some()
+                || body.sos.is_some()
+            {
+                return Err("Nieprawidlowa koperta kanalu".to_string());
+            }
+        }
+        "group" => {
+            if !is_valid_group_id(&body.recipient_id)
+                || !encrypted_fields_valid
+                || body.ack_msg_id.is_some()
+                || body.sos.is_some()
+            {
+                return Err("Nieprawidlowa koperta grupy".to_string());
             }
         }
         "ack" => {
@@ -1158,6 +1585,7 @@ pub fn handle_incoming(app: &AppHandle, state: &MeshState, from_address: &str, r
                             id: id.to_string(),
                             name: peer_name.to_string(),
                             online,
+                            verified: state.store.is_peer_verified(id),
                             last_seen: Some(chrono::Utc::now().to_rfc3339()),
                         });
                     }
@@ -1187,6 +1615,13 @@ fn handle_incoming_inner(
     if body.sender_id == state.node_id {
         return;
     }
+
+    let hop_count = body
+        .max_hops
+        .saturating_sub(envelope.hops_remaining)
+        .saturating_add(1);
+    state.learn_route(&body.sender_id, from_address, hop_count);
+
     let addressed_text = body.msg_type == "text" && body.recipient_id == state.node_id;
     if state.has_seen(&body.msg_id) {
         // ACK may have been lost. Re-ACK only when the message is already in
@@ -1266,6 +1701,7 @@ fn handle_incoming_inner(
             if !already_known {
                 let _ = send_presence(state, from_address);
             }
+            flush_dtn_transit(state, Some(from_address));
             return;
         }
         "text" if body.recipient_id == state.node_id => {
@@ -1276,7 +1712,38 @@ fn handle_incoming_inner(
                     ciphertext,
                     nonce,
                 ) {
-                    if text.len() <= MAX_TEXT_BYTES {
+                    let max_len = max_allowed_text_len(&text);
+                    if text.len() <= max_len {
+                        if let Some(invite_json) = text.strip_prefix("VOID_GROUP_INVITE:") {
+                            if let Ok(invite) =
+                                serde_json::from_str::<GroupInvitePayload>(invite_json)
+                            {
+                                if is_valid_group_id(&invite.group_id) {
+                                    let record = GroupRecord {
+                                        group_id: invite.group_id.clone(),
+                                        name: truncate_utf8(&invite.name, MAX_NAME_BYTES),
+                                        key_b64: invite.key_b64.clone(),
+                                        members: invite.members.clone(),
+                                        created_at_ms: body.created_at_ms,
+                                    };
+                                    if state.store.upsert_group(record.clone()).is_ok() {
+                                        emit(
+                                            "group_invited",
+                                            serde_json::json!({
+                                                "groupId": record.group_id,
+                                                "name": record.name,
+                                                "members": record.members,
+                                                "senderId": body.sender_id,
+                                            }),
+                                        );
+                                    }
+                                    state.mark_seen(&body.msg_id, body.created_at_ms);
+                                    send_ack(state, &body.sender_id, &body.msg_id);
+                                    return;
+                                }
+                            }
+                        }
+
                         let stored = match state.store.enqueue_inbox(InboxRecord {
                             msg_id: body.msg_id.clone(),
                             peer_id: body.sender_id.clone(),
@@ -1294,6 +1761,7 @@ fn handle_incoming_inner(
                             }
                         };
                         state.mark_seen(&body.msg_id, body.created_at_ms);
+                        let _ = state.store.remove_dtn_transit(&body.msg_id);
                         if stored {
                             emit(
                                 "message_received",
@@ -1317,9 +1785,77 @@ fn handle_incoming_inner(
             }
             return;
         }
+        "channel" => {
+            if let (Some(ciphertext), Some(nonce)) = (&body.ciphertext, &body.nonce) {
+                let key = crypto::derive_channel_key(&body.recipient_id);
+                if let Some(text) = crypto::decrypt_with_key(&key, ciphertext, nonce) {
+                    if text.len() <= max_allowed_text_len(&text) {
+                        let stored = state
+                            .store
+                            .enqueue_inbox(InboxRecord {
+                                msg_id: body.msg_id.clone(),
+                                peer_id: body.recipient_id.clone(),
+                                text: text.clone(),
+                                timestamp_ms: body.created_at_ms,
+                                stored_at_ms: now_ms(),
+                            })
+                            .unwrap_or(false);
+                        if stored {
+                            emit(
+                                "message_received",
+                                serde_json::json!({
+                                    "id": body.msg_id,
+                                    "peerId": body.recipient_id,
+                                    "senderId": body.sender_id,
+                                    "senderName": body.presence_name,
+                                    "text": text,
+                                    "timestamp": body.created_at_ms
+                                }),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        "group" => {
+            if let Some(group) = state.store.group(&body.recipient_id) {
+                if let Ok(key) = crypto::decode_group_key(&group.key_b64) {
+                    if let (Some(ciphertext), Some(nonce)) = (&body.ciphertext, &body.nonce) {
+                        if let Some(text) = crypto::decrypt_with_key(&key, ciphertext, nonce) {
+                            if text.len() <= max_allowed_text_len(&text) {
+                                let stored = state
+                                    .store
+                                    .enqueue_inbox(InboxRecord {
+                                        msg_id: body.msg_id.clone(),
+                                        peer_id: body.recipient_id.clone(),
+                                        text: text.clone(),
+                                        timestamp_ms: body.created_at_ms,
+                                        stored_at_ms: now_ms(),
+                                    })
+                                    .unwrap_or(false);
+                                if stored {
+                                    emit(
+                                        "message_received",
+                                        serde_json::json!({
+                                            "id": body.msg_id,
+                                            "peerId": body.recipient_id,
+                                            "senderId": body.sender_id,
+                                            "senderName": body.presence_name,
+                                            "text": text,
+                                            "timestamp": body.created_at_ms
+                                        }),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "ack" if body.recipient_id == state.node_id => {
             if let Some(ack_id) = &body.ack_msg_id {
                 let _ = state.store.remove_outbox(ack_id);
+                let _ = state.store.remove_dtn_transit(ack_id);
                 emit(
                     "message_ack_received",
                     serde_json::json!({
@@ -1385,7 +1921,12 @@ fn handle_incoming_inner(
                 }
             }
         }
-        "text" | "ack" | "location" => {}
+        "ack" => {
+            if let Some(ack_id) = &body.ack_msg_id {
+                let _ = state.store.remove_dtn_transit(ack_id);
+            }
+        }
+        "text" | "location" => {}
         _ => return,
     }
 
@@ -1398,6 +1939,24 @@ fn handle_incoming_inner(
         let mut forwarded = envelope;
         forwarded.hops_remaining -= 1;
         if forwarded.hops_remaining > 0 {
+            if matches!(
+                forwarded.body.msg_type.as_str(),
+                "text" | "group" | "channel" | "sos"
+            ) {
+                if let Ok(forwarded_json) = serialize_envelope(&forwarded) {
+                    let _ = state.store.enqueue_dtn_transit(
+                        DtnTransitRecord {
+                            msg_id: forwarded.body.msg_id.clone(),
+                            recipient_id: forwarded.body.recipient_id.clone(),
+                            sender_id: forwarded.body.sender_id.clone(),
+                            envelope_json: forwarded_json,
+                            created_at_ms: forwarded.body.created_at_ms,
+                            stored_at_ms: now_ms(),
+                        },
+                        now_ms(),
+                    );
+                }
+            }
             let _ = relay(state, &forwarded, Some(from_address));
         }
     }
@@ -1696,5 +2255,92 @@ mod tests {
             state.find_address_by_peer_id(&state.node_id).as_deref(),
             Some("AA:BB:CC:DD:EE:01")
         );
+    }
+
+    #[test]
+    fn aodv_lite_routes_unicast_and_dtn_courier_forwards_on_presence() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+        let (courier, courier_tx) = state_with_transport(50);
+        courier.mark_connected("alice-address");
+
+        let result = send_text(&alice, &bob.node_id, "dtn courier packet").unwrap();
+        let payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+
+        deliver(&courier, "alice-address", &payload);
+        assert_eq!(get_mesh_diagnostics(&courier).dtn_buffered_count, 1);
+        assert_eq!(
+            courier.best_next_hop(&alice.node_id, None).as_deref(),
+            Some("alice-address")
+        );
+
+        courier.mark_connected("bob-direct-addr");
+        bob.mark_connected("courier-addr");
+        send_presence(&bob, "courier-addr").unwrap();
+        let bob_presence = create_envelope(
+            &bob,
+            "presence",
+            "*",
+            1,
+            None,
+            None,
+            Some("Bob".to_string()),
+            None,
+            None,
+        )
+        .unwrap();
+        deliver(
+            &courier,
+            "bob-direct-addr",
+            &serialize_envelope(&bob_presence).unwrap(),
+        );
+
+        let forwarded_to_bob = courier_tx
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(addr, _, id)| addr == "bob-direct-addr" && id == &result.msg_id)
+            .map(|(_, json, _)| json.clone())
+            .expect("Courier should flush DTN packet to Bob on presence");
+        let bob_events = deliver(&bob, "courier-addr", &forwarded_to_bob);
+        assert!(bob_events
+            .iter()
+            .any(|(name, ev)| name == "message_received" && ev["text"] == "dtn courier packet"));
+    }
+
+    #[test]
+    fn channels_groups_and_safety_numbers_work_end_to_end() {
+        let (alice, alice_tx, bob, _) = pair_alice_bob();
+
+        let sn_alice = get_safety_number(&alice, &bob.node_id).unwrap();
+        let sn_bob = get_safety_number(&bob, &alice.node_id).unwrap();
+        assert_eq!(sn_alice.digits, sn_bob.digits);
+        assert_eq!(sn_alice.words, sn_bob.words);
+        assert!(sn_alice.verified);
+
+        send_channel_message(&alice, "#ogolny", "meldunek z terenu").unwrap();
+        let chan_payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        let bob_chan_events = deliver(&bob, "alice-address", &chan_payload);
+        assert!(bob_chan_events.iter().any(|(name, ev)| {
+            name == "message_received"
+                && ev["peerId"] == "#ogolny"
+                && ev["text"] == "meldunek z terenu"
+        }));
+
+        let group = create_group(&alice, "Grupa Alfa", vec![bob.node_id.clone()]).unwrap();
+        let invite_payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        let bob_invite_events = deliver(&bob, "alice-address", &invite_payload);
+        assert!(bob_invite_events
+            .iter()
+            .any(|(name, ev)| name == "group_invited" && ev["groupId"] == group.group_id));
+
+        send_group_message(&alice, &group.group_id, "rozpoczynamy zwiad").unwrap();
+        let group_msg_payload = alice_tx.sent.lock().unwrap().last().unwrap().1.clone();
+        let bob_group_events = deliver(&bob, "alice-address", &group_msg_payload);
+        assert!(bob_group_events.iter().any(|(name, ev)| {
+            name == "message_received"
+                && ev["peerId"] == group.group_id
+                && ev["text"] == "rozpoczynamy zwiad"
+        }));
     }
 }

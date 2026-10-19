@@ -291,8 +291,8 @@ pub fn verify(public: &VerifyingKey, message: &[u8], signature_b64: &str) -> boo
     public.verify(message, &signature).is_ok()
 }
 
-fn derive_cascade_keys(shared: &x25519_dalek::SharedSecret, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
-    let hk = Hkdf::<Sha256>::new(Some(salt), shared.as_bytes());
+fn derive_cascade_keys_from_bytes(secret_bytes: &[u8; 32], salt: &[u8]) -> ([u8; 32], [u8; 32]) {
+    let hk = Hkdf::<Sha256>::new(Some(salt), secret_bytes);
     let mut aes_key = [0u8; 32];
     let mut chacha_key = [0u8; 32];
     // SHA-256 HKDF can always expand these fixed-size outputs.
@@ -303,21 +303,39 @@ fn derive_cascade_keys(shared: &x25519_dalek::SharedSecret, salt: &[u8]) -> ([u8
     (aes_key, chacha_key)
 }
 
-pub fn encrypt(
-    my_secret: &StaticSecret,
-    their_public: &PublicKey,
-    plaintext: &str,
-) -> Result<(String, String), String> {
-    let shared = my_secret.diffie_hellman(their_public);
-    if !shared.was_contributory() {
-        return Err("Odrzucono niebezpieczny klucz publiczny X25519".to_string());
-    }
+fn derive_cascade_keys(shared: &x25519_dalek::SharedSecret, salt: &[u8]) -> ([u8; 32], [u8; 32]) {
+    derive_cascade_keys_from_bytes(shared.as_bytes(), salt)
+}
 
+pub fn generate_group_key() -> String {
+    let mut key = [0u8; 32];
+    OsRng.fill_bytes(&mut key);
+    let encoded = STANDARD.encode(key);
+    key.zeroize();
+    encoded
+}
+
+pub fn decode_group_key(key_b64: &str) -> Result<[u8; 32], String> {
+    decode_32(key_b64, "group_key")
+}
+
+pub fn derive_channel_key(channel_id: &str) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(b"VOID_CHANNEL_KEY_V2:");
+    hasher.update(channel_id.trim().to_ascii_lowercase().as_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+pub fn encrypt_with_key(key: &[u8; 32], plaintext: &str) -> Result<(String, String), String> {
     let mut salt = [0u8; 16];
     let mut nonce_bytes = [0u8; 12];
     OsRng.fill_bytes(&mut salt);
     OsRng.fill_bytes(&mut nonce_bytes);
-    let (mut aes_key, mut chacha_key) = derive_cascade_keys(&shared, &salt);
+    let (mut aes_key, mut chacha_key) = derive_cascade_keys_from_bytes(key, &salt);
 
     let result = (|| -> Result<(String, String), String> {
         let aes_cipher = Aes256Gcm::new((&aes_key).into());
@@ -349,23 +367,17 @@ pub fn encrypt(
     result
 }
 
-pub fn decrypt(
-    my_secret: &StaticSecret,
-    their_public: &PublicKey,
+pub fn decrypt_with_key(
+    key: &[u8; 32],
     ciphertext_b64: &str,
     combined_nonce_b64: &str,
 ) -> Option<String> {
-    let shared = my_secret.diffie_hellman(their_public);
-    if !shared.was_contributory() {
-        return None;
-    }
-
     let mut combined = STANDARD.decode(combined_nonce_b64).ok()?;
     if combined.len() != 28 {
         combined.zeroize();
         return None;
     }
-    let (mut aes_key, mut chacha_key) = derive_cascade_keys(&shared, &combined[..16]);
+    let (mut aes_key, mut chacha_key) = derive_cascade_keys_from_bytes(key, &combined[..16]);
 
     let result = (|| -> Option<String> {
         let mut ciphertext = STANDARD.decode(ciphertext_b64).ok()?;
@@ -397,6 +409,151 @@ pub fn decrypt(
     result
 }
 
+const SAFETY_WORDS: [&str; 64] = [
+    "ALFA",
+    "BRAVO",
+    "CHARLIE",
+    "DELTA",
+    "ECHO",
+    "FOXTROT",
+    "GOLF",
+    "HOTEL",
+    "INDIA",
+    "JULIET",
+    "KILO",
+    "LIMA",
+    "MIKE",
+    "NOVEMBER",
+    "OSCAR",
+    "PAPA",
+    "QUEBEC",
+    "ROMEO",
+    "SIERRA",
+    "TANGO",
+    "UNIFORM",
+    "VICTOR",
+    "WHISKEY",
+    "XRAY",
+    "YANKEE",
+    "ZULU",
+    "ORZEL",
+    "SOKOL",
+    "WILK",
+    "RYS",
+    "ZUBR",
+    "GRYF",
+    "GROM",
+    "BURZA",
+    "ISKRA",
+    "PLOMIEN",
+    "TARCZA",
+    "WLócznia",
+    "BASTION",
+    "FORTECA",
+    "GRANIT",
+    "KRZEM",
+    "TYTAN",
+    "KOBALT",
+    "NEON",
+    "ARGON",
+    "ZENIT",
+    "NADIR",
+    "WEKTOR",
+    "PULSAR",
+    "KWAZAR",
+    "ORBITA",
+    "HORYZONT",
+    "KOMPAS",
+    "AZYMUT",
+    "SEKTOR",
+    "KODEX",
+    "SYGNAL",
+    "RADAR",
+    "SONAR",
+    "PRYZMAT",
+    "WIDMO",
+    "OGNIWO",
+    "KOTWICA",
+];
+
+pub fn compute_safety_number(
+    my_sig_b64: &str,
+    my_enc_b64: &str,
+    peer_sig_b64: &str,
+    peer_enc_b64: &str,
+) -> Result<(String, Vec<String>), String> {
+    use sha2::Digest;
+    let my_sig = decode_32(my_sig_b64, "my_sig_b64")?;
+    let my_enc = decode_32(my_enc_b64, "my_enc_b64")?;
+    let peer_sig = decode_32(peer_sig_b64, "peer_sig_b64")?;
+    let peer_enc = decode_32(peer_enc_b64, "peer_enc_b64")?;
+
+    let mut side_a = [0u8; 64];
+    side_a[..32].copy_from_slice(&my_sig);
+    side_a[32..].copy_from_slice(&my_enc);
+
+    let mut side_b = [0u8; 64];
+    side_b[..32].copy_from_slice(&peer_sig);
+    side_b[32..].copy_from_slice(&peer_enc);
+
+    let (first, second) = if side_a <= side_b {
+        (side_a, side_b)
+    } else {
+        (side_b, side_a)
+    };
+
+    let mut blocks = Vec::with_capacity(12);
+    let mut words = Vec::with_capacity(6);
+    for round in 0..2u8 {
+        let mut hasher = Sha256::new();
+        hasher.update(b"VOID_SAFETY_NUMBER_V2");
+        hasher.update([round]);
+        hasher.update(first);
+        hasher.update(second);
+        let digest = hasher.finalize();
+        for chunk_idx in 0..6 {
+            let offset = chunk_idx * 5;
+            let val = ((digest[offset] as u64) << 32)
+                | ((digest[offset + 1] as u64) << 24)
+                | ((digest[offset + 2] as u64) << 16)
+                | ((digest[offset + 3] as u64) << 8)
+                | (digest[offset + 4] as u64);
+            blocks.push(format!("{:05}", val % 100_000));
+            if round == 0 {
+                let word_idx = (val as usize) % SAFETY_WORDS.len();
+                words.push(SAFETY_WORDS[word_idx].to_string());
+            }
+        }
+    }
+
+    Ok((blocks.join(" "), words))
+}
+
+pub fn encrypt(
+    my_secret: &StaticSecret,
+    their_public: &PublicKey,
+    plaintext: &str,
+) -> Result<(String, String), String> {
+    let shared = my_secret.diffie_hellman(their_public);
+    if !shared.was_contributory() {
+        return Err("Odrzucono niebezpieczny klucz publiczny X25519".to_string());
+    }
+    encrypt_with_key(shared.as_bytes(), plaintext)
+}
+
+pub fn decrypt(
+    my_secret: &StaticSecret,
+    their_public: &PublicKey,
+    ciphertext_b64: &str,
+    combined_nonce_b64: &str,
+) -> Option<String> {
+    let shared = my_secret.diffie_hellman(their_public);
+    if !shared.was_contributory() {
+        return None;
+    }
+    decrypt_with_key(shared.as_bytes(), ciphertext_b64, combined_nonce_b64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +582,27 @@ mod tests {
         let signature = sign(&signing, b"message");
         assert!(verify(&signing.verifying_key(), b"message", &signature));
         assert!(!verify(&signing.verifying_key(), b"tampered", &signature));
+    }
+
+    #[test]
+    fn safety_number_is_symmetric_and_group_key_round_trips() {
+        let a_sig = STANDARD.encode([1u8; 32]);
+        let a_enc = STANDARD.encode([2u8; 32]);
+        let b_sig = STANDARD.encode([3u8; 32]);
+        let b_enc = STANDARD.encode([4u8; 32]);
+        let (digits_ab, words_ab) = compute_safety_number(&a_sig, &a_enc, &b_sig, &b_enc).unwrap();
+        let (digits_ba, words_ba) = compute_safety_number(&b_sig, &b_enc, &a_sig, &a_enc).unwrap();
+        assert_eq!(digits_ab, digits_ba);
+        assert_eq!(words_ab, words_ba);
+        assert_eq!(digits_ab.split_whitespace().count(), 12);
+        assert_eq!(words_ab.len(), 6);
+
+        let group_key_b64 = generate_group_key();
+        let group_key = decode_group_key(&group_key_b64).unwrap();
+        let (ct, nonce) = encrypt_with_key(&group_key, "tajna grupa").unwrap();
+        assert_eq!(
+            decrypt_with_key(&group_key, &ct, &nonce).as_deref(),
+            Some("tajna grupa")
+        );
     }
 }

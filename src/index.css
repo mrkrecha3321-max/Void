@@ -40,6 +40,26 @@
   --color-border: #27272a;
 }
 
+/* TRUE BLACK OLED TACTICAL THEME via data-theme="oled" */
+[data-theme="oled"] {
+  --color-background: #000000;
+  --color-foreground: #f4f4f5;
+  
+  --color-primary: #10b981;
+  --color-primary-foreground: #000000;
+  
+  --color-secondary: #0c0c0f;
+  --color-secondary-foreground: #f4f4f5;
+  
+  --color-accent: #10b981;
+  --color-accent-foreground: #000000;
+  
+  --color-muted: #121216;
+  --color-muted-foreground: #8b8b95;
+  
+  --color-border: #1f1f26;
+}
+
 html, body, #root {
   height: 100%;
   width: 100%;

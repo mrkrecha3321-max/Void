@@ -20,6 +20,8 @@ pub struct Peer {
     pub id: String,
     pub name: String,
     pub online: bool,
+    #[serde(default)]
+    pub verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<String>,
 }
@@ -30,6 +32,8 @@ pub struct PeerDiscoveredPayload {
     pub id: String,
     pub name: String,
     pub online: bool,
+    #[serde(default)]
+    pub verified: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,6 +87,7 @@ fn add_peer(
         return Err("Nieprawidlowy Node ID peera".to_string());
     }
     let name = validate_display_name(&name)?;
+    let verified = state.secure_store.is_peer_verified(&peer_id);
     let mut peers = state.peers.lock().map_err(|e| e.to_string())?;
     if peers.len() >= 2_048 && !peers.iter().any(|peer| peer.id == peer_id) {
         return Err("Osiagnieto limit zapisanych peerow".to_string());
@@ -93,6 +98,7 @@ fn add_peer(
             name: name.clone(),
             // Manual addition is not proof of connectivity.
             online: false,
+            verified,
             last_seen: None,
         };
         peers.push(peer.clone());
@@ -102,6 +108,7 @@ fn add_peer(
                 id: peer.id,
                 name: peer.name,
                 online: false,
+                verified,
             },
         );
     }
@@ -171,11 +178,13 @@ fn import_contact_card(
     let mut peers = state.peers.lock().map_err(|e| e.to_string())?;
     if let Some(peer) = peers.iter_mut().find(|peer| peer.id == info.node_id) {
         peer.name = info.name.clone();
+        peer.verified = true;
     } else if peers.len() < 2_048 {
         peers.push(Peer {
             id: info.node_id.clone(),
             name: info.name.clone(),
             online: false,
+            verified: true,
             last_seen: None,
         });
     } else {
@@ -188,6 +197,7 @@ fn import_contact_card(
             id: info.node_id.clone(),
             name: info.name.clone(),
             online: false,
+            verified: true,
         },
     );
     Ok(info)
@@ -353,6 +363,67 @@ fn mesh_send_text(
 }
 
 #[tauri::command]
+fn mesh_send_channel_message(
+    mesh: State<'_, mesh::MeshState>,
+    channel_id: String,
+    text: String,
+) -> Result<mesh::SendResult, String> {
+    mesh::send_channel_message(&mesh, &channel_id, &text)
+}
+
+#[tauri::command]
+fn mesh_create_group(
+    mesh: State<'_, mesh::MeshState>,
+    name: String,
+    members: Vec<String>,
+) -> Result<storage::GroupRecord, String> {
+    mesh::create_group(&mesh, &name, members)
+}
+
+#[tauri::command]
+fn mesh_list_groups(state: State<'_, AppState>) -> Vec<storage::GroupRecord> {
+    state.secure_store.groups()
+}
+
+#[tauri::command]
+fn mesh_send_group_message(
+    mesh: State<'_, mesh::MeshState>,
+    group_id: String,
+    text: String,
+) -> Result<mesh::SendResult, String> {
+    mesh::send_group_message(&mesh, &group_id, &text)
+}
+
+#[tauri::command]
+fn get_safety_number(
+    mesh: State<'_, mesh::MeshState>,
+    peer_id: String,
+) -> Result<mesh::SafetyNumberInfo, String> {
+    mesh::get_safety_number(&mesh, &peer_id)
+}
+
+#[tauri::command]
+fn set_peer_verified(
+    state: State<'_, AppState>,
+    mesh: State<'_, mesh::MeshState>,
+    peer_id: String,
+    verified: bool,
+) -> Result<(), String> {
+    mesh::set_peer_verified(&mesh, &peer_id, verified)?;
+    if let Ok(mut peers) = state.peers.lock() {
+        if let Some(peer) = peers.iter_mut().find(|p| p.id == peer_id) {
+            peer.verified = verified;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_mesh_diagnostics(mesh: State<'_, mesh::MeshState>) -> mesh::MeshDiagnostics {
+    mesh::get_mesh_diagnostics(&mesh)
+}
+
+#[tauri::command]
 fn mesh_send_location(
     mesh: State<'_, mesh::MeshState>,
     recipient_id: String,
@@ -472,6 +543,7 @@ pub fn run() {
                             id,
                             name,
                             online: false,
+                            verified: false,
                             last_seen: None,
                         },
                     )
@@ -484,6 +556,7 @@ pub fn run() {
                         id: pin.node_id,
                         name: pin.name,
                         online: false,
+                        verified: pin.verified,
                         last_seen: chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
                             pin.updated_at_ms as i64,
                         )
@@ -535,6 +608,13 @@ pub fn run() {
             ble_connect_to_peer,
             mesh_get_public_key,
             mesh_send_text,
+            mesh_send_channel_message,
+            mesh_create_group,
+            mesh_list_groups,
+            mesh_send_group_message,
+            get_safety_number,
+            set_peer_verified,
+            get_mesh_diagnostics,
             mesh_send_location,
             mesh_flush_outbox,
             mesh_retry_message,

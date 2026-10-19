@@ -7,6 +7,7 @@ object BleLinkPolicy {
     const val DEFAULT_MTU = 23
     const val MAX_FRAME_PAYLOAD = 512
     const val MAX_MESSAGE_BYTES = 4_080
+    const val MAX_MEDIA_MESSAGE_BYTES = 24_576
     const val MAX_CHUNKS_V2 = 2_048
     const val MAX_WRITE_ATTEMPTS = 3
     const val MAX_RECONNECT_ATTEMPTS = 8

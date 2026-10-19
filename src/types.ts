@@ -12,6 +12,7 @@ export interface Peer {
   id: string;
   name: string;
   online: boolean;
+  verified?: boolean;
   lastSeen?: Date | string;
   lastBleSeenAt?: number;
   rssi?: number;
@@ -25,6 +26,8 @@ export interface Chat {
   id: string;
   peerId: string;
   peerName: string;
+  kind?: 'direct' | 'channel' | 'group';
+  members?: string[];
   lastMessage?: string;
   lastMessageTime?: Date | string;
   unreadCount: number;
@@ -36,6 +39,8 @@ export interface Message {
   chatId?: string;
   text: string;
   sent?: boolean;
+  senderId?: string;
+  senderName?: string;
   timestamp: Date | string;
   delivered?: boolean;
   failed?: boolean;
@@ -48,14 +53,57 @@ export interface Message {
 export interface MessageReceivedPayload {
   id: string;
   peerId: string;
+  senderId?: string;
+  senderName?: string;
   text: string;
   timestamp: number;
+}
+
+export interface GroupInvitedPayload {
+  groupId: string;
+  name: string;
+  members: string[];
+  senderId: string;
+}
+
+export interface GroupRecord {
+  groupId: string;
+  name: string;
+  keyB64: string;
+  members: string[];
+  createdAtMs: number;
+}
+
+export type GroupInfo = Pick<GroupRecord, 'groupId' | 'name' | 'members'>;
+
+export interface SafetyNumberInfo {
+  peerId: string;
+  digits: string;
+  words: string[];
+  verified: boolean;
+}
+
+export interface RouteEntry {
+  destinationId: string;
+  nextHopAddress: string;
+  hopCount: number;
+  rssi: number;
+  updatedAtMs: number;
+}
+
+export interface MeshDiagnostics {
+  routes: RouteEntry[];
+  dtnBufferedCount: number;
+  dtnBufferedBytes: number;
+  outboxCount: number;
+  connectedCount: number;
 }
 
 export interface PeerDiscoveredPayload {
   id: string;
   name: string;
   online: boolean;
+  verified?: boolean;
   rssi?: number;
   address?: string;
   linkStatus?: PeerLinkStatus;
@@ -76,6 +124,8 @@ export interface PeerLinkPayload {
 export interface InboxMessagePayload {
   id: string;
   peerId: string;
+  senderId?: string;
+  senderName?: string;
   text: string;
   timestamp: number;
 }
@@ -130,3 +180,4 @@ export interface ChatNode {
   unread: number;
   bio?: string;
 }
+

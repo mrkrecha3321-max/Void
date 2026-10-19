@@ -3,11 +3,13 @@ import Avatar from '../components/Avatar';
 import {
   exportIdentityBackup,
   getContactCard,
+  getMeshDiagnostics,
   importIdentityBackup,
   meshSendSos,
   setNodeName,
   triggerPanic,
 } from '../api';
+import type { MeshDiagnostics } from '../types';
 import type { Theme } from '../hooks/useTheme';
 import { useSettings } from '../hooks/useSettings';
 import { 
@@ -73,9 +75,28 @@ const MenuScreen: React.FC<Props> = ({
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateCheckInfo, setUpdateCheckInfo] = useState<string | null>(null);
   const [copiedCard, setCopiedCard] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<MeshDiagnostics | null>(null);
 
   React.useEffect(() => {
     getVersion().then(v => setAppVersion(v)).catch(console.error);
+  }, []);
+
+  React.useEffect(() => {
+    if (!(window as any)['__TAURI_INTERNALS__']) return;
+    let active = true;
+    const poll = () => {
+      getMeshDiagnostics()
+        .then(d => {
+          if (active) setDiagnostics(d);
+        })
+        .catch(() => {});
+    };
+    poll();
+    const timer = setInterval(poll, 5_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, []);
 
   React.useEffect(() => {
@@ -513,14 +534,45 @@ const MenuScreen: React.FC<Props> = ({
                 Wygląd i Powiadomienia
               </div>
               
-              {renderToggle(<Moon size={20} />, 'Motyw Aplikacji', theme === 'dark' ? 'Ciemny motyw' : 'Jasny motyw', theme === 'dark', toggleTheme)}
+              {renderToggle(
+                <Moon size={20} />,
+                'Motyw Aplikacji (OLED / Dark / Light)',
+                theme === 'oled'
+                  ? 'True Black OLED (#000000 — oszczędza baterię)'
+                  : theme === 'dark'
+                  ? 'Ciemny motyw'
+                  : 'Jasny motyw',
+                theme !== 'light',
+                toggleTheme
+              )}
               {renderToggle(<Vibrate size={20} />, 'Wibracje', 'Wibracje przy nowej wiadomości', settings.vibrations, (val) => updateSetting('vibrations', val))}
               {renderToggle(<Volume2 size={20} />, 'Dźwięki', 'Odtwarzaj dźwięki powiadomień', settings.sounds, (val) => updateSetting('sounds', val))}
               {renderToggle(<Bell size={20} />, 'Powiadomienia SOS', 'Pokazuj systemowe powiadomienie dla sygnałów SOS', settings.criticalSos, (val) => updateSetting('criticalSos', val), true)}
 
               <div className="px-6 pt-6 pb-2 text-xs font-bold uppercase tracking-widest text-muted-foreground">
-                Ustawienia Sieci Mesh (BLE)
+                Ustawienia Sieci Mesh (BLE + AODV + DTN)
               </div>
+
+              {diagnostics && (
+                <div className="mx-6 my-2 p-4 rounded-2xl bg-secondary/50 border border-border/60 flex flex-col gap-2 text-xs font-mono">
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Trasy AODV-lite (Unicast):</span>
+                    <span className="font-bold text-accent">{diagnostics.routes.length} aktywnych</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Bufor Kuriera DTN (7 dni):</span>
+                    <span className="font-bold text-emerald-500">
+                      {diagnostics.dtnBufferedCount} pak. ({Math.round(diagnostics.dtnBufferedBytes / 1024)} KB / 50 MB)
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-muted-foreground">Kolejka Outbox / Łącza GATT:</span>
+                    <span className="font-bold text-foreground">
+                      {diagnostics.outboxCount} oczek. / {diagnostics.connectedCount} połącz.
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div className="flex items-center px-6 py-4 border-b border-border/10">
                 <div className="w-10 h-10 rounded-full bg-accent/10 text-accent flex items-center justify-center flex-shrink-0">
